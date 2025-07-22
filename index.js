@@ -75,7 +75,7 @@ app.post('/api/login', async (req, res) => {
   const { email, password, rememberMe } = req.body;
   
   // Validação CSRF
-const csrfHeader = req.headers['CSRF-Token'];
+const csrfHeader = req.headers['csrf-token'];
 
 if (!csrfHeader || csrfHeader !== req.cookies['XSRF-TOKEN']) {
   return res.status(403).json({ message: 'Token CSRF inválido' });
