@@ -63,7 +63,7 @@ app.get('/api/csrf-token', (req, res) => {
   const csrfToken = crypto.randomBytes(32).toString('hex');
   res.cookie('XSRF-TOKEN', csrfToken, {
     secure: process.env.NODE_ENV === 'production',
-    httpOnly: true,
+    httpOnly: false,
     sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
     maxAge: 86400000
   });
