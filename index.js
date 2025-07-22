@@ -57,12 +57,13 @@ const pool = new Pool({
 // 4. Endpoint CSRF Token
 app.get('/api/csrf-token', (req, res) => {
   const csrfToken = crypto.randomBytes(32).toString('hex');
-  res.cookie('XSRF-TOKEN', csrfToken, {
-    secure: process.env.NODE_ENV === 'production',
-    httpOnly: false,
-    sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
-    maxAge: 86400000
-  });
+res.cookie('XSRF-TOKEN', csrfToken, {
+  secure: true, // sempre true em cross-domain
+  httpOnly: false,
+  sameSite: 'None', // necessário para cookies em domínios diferentes
+  maxAge: 86400000
+});
+
   res.json({ token: csrfToken });
 });
 
