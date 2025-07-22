@@ -18,10 +18,14 @@ app.use(cookieParser());
 // Configuração detalhada do CORS
 const corsOptions = {
   origin: (origin, callback) => {
-    const allowedOrigins = process.env.ALLOWED_ORIGINS.split(',');
+    const allowedOrigins = process.env.ALLOWED_ORIGINS
+      ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
+      : [];
+
     if (!origin || allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
+      console.error(`⛔ CORS bloqueado para origem: ${origin}`);
       callback(new Error('Not allowed by CORS'));
     }
   },
@@ -30,6 +34,10 @@ const corsOptions = {
   allowedHeaders: ['Content-Type', 'CSRF-Token'],
   exposedHeaders: ['CSRF-Token']
 };
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions)); // para pré-flights (OPTIONS)
+
 
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
