@@ -38,10 +38,6 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions)); // para pré-flights (OPTIONS)
 
-
-app.use(cors(corsOptions));
-app.options('*', cors(corsOptions));
-
 app.use(express.json({ limit: '10kb' }));
 
 // 2. Rate Limiting
