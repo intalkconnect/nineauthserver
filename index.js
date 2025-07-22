@@ -72,12 +72,15 @@ app.get('/api/csrf-token', (req, res) => {
 
 // 5. Endpoint de Login
 app.post('/api/login', async (req, res) => {
-  const { email, password, csrfToken, rememberMe } = req.body;
+  const { email, password, rememberMe } = req.body;
   
   // Validação CSRF
-  if (!csrfToken || csrfToken !== req.cookies['XSRF-TOKEN']) {
-    return res.status(403).json({ message: 'Token CSRF inválido' });
-  }
+const csrfHeader = req.headers['CSRF-Token'];
+
+if (!csrfHeader || csrfHeader !== req.cookies['XSRF-TOKEN']) {
+  return res.status(403).json({ message: 'Token CSRF inválido' });
+}
+
 
   try {
     const result = await pool.query(
