@@ -141,6 +141,17 @@ if (!csrfHeader || csrfHeader !== req.cookies['XSRF-TOKEN']) {
   }
 });
 
+app.post('/api/logout', (req, res) => {
+  res.clearCookie('authToken', {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'strict'
+  });
+
+  res.json({ message: 'Logout realizado com sucesso' });
+});
+
+
 // 6. Health Checks
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', env: process.env.NODE_ENV });
