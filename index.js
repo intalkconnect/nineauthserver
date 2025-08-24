@@ -1,4 +1,3 @@
-// index.js (sem bootstrap)
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -20,14 +19,10 @@ app.use(helmet());
 app.use(cookieParser());
 app.use(express.json({ limit: '10kb' }));
 
-/* ============== CORS via .env (wildcards suportados) ==============
-   .env exemplo:
-   ALLOWED_ORIGIN_PATTERNS=https://hubclient-blue.vercel.app,*.dkdevs.com.br,dkdevs.com.br,http://localhost:5173
-*/
+/* ============== CORS via .env (wildcards suportados) ============== */
 const RAW_PATTERNS =
   process.env.ALLOWED_ORIGIN_PATTERNS ||
-  process.env.ALLOWED_ORIGINS || // fallback p/ compat
-  '';
+  process.env.ALLOWED_ORIGINS || '';
 
 const ORIGIN_PATTERNS = RAW_PATTERNS.split(',').map(s => s.trim()).filter(Boolean);
 console.log('[CORS] patterns:', ORIGIN_PATTERNS);
@@ -72,7 +67,7 @@ app.options('*', cors(corsOptions));
 /* ============== Banco ============== */
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: false, // ajuste p/ seu provedor (alguns exigem { rejectUnauthorized:false })
+  ssl: false, // ajuste p/ seu provedor
 });
 
 /* ============== E-mail ============== */
@@ -107,6 +102,21 @@ const resetLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false,
 });
 
+/* ============== Montagem de URL do tenant pelo BACK ==============
+   Preferência:
+   1) TENANT_ACCESS_URL_TEMPLATE (ex.: https://{slug}.dkdevs.com.br)
+   2) TENANT_PROTOCOL + TENANT_DOMAIN_BASE -> https://{slug}.{base}
+   3) fallback para access_url do banco (quando existir)
+*/
+function tenantBaseUrl({ slug, fallbackAccessUrl }) {
+  const base = process.env.TENANT_DOMAIN_BASE;
+  if (base) {
+    return `https://${slug}.${base}`;
+  }
+  // último recurso: usar o que vier do banco
+  return String(fallbackAccessUrl || '').replace(/\/+$/, '');
+}
+
 /* ============== CSRF ============== */
 app.get('/api/csrf-token', (req, res) => {
   const csrfToken = crypto.randomBytes(32).toString('hex');
@@ -119,7 +129,7 @@ app.get('/api/csrf-token', (req, res) => {
   res.json({ token: csrfToken });
 });
 
-/* ============== LOGIN (igual ao antigo) ============== */
+/* ============== LOGIN (igual ao antigo quanto ao redirect) ============== */
 app.post('/api/login', loginLimiter, async (req, res) => {
   const { email, password, rememberMe } = req.body;
 
@@ -132,7 +142,7 @@ app.post('/api/login', loginLimiter, async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT u.id, u.email, u.password, u.profile, u.login_attempts, u.locked_until,
-              c.access_url
+              c.slug, c.access_url  -- usamos slug e só usamos access_url como fallback
          FROM users u
          JOIN companies c ON u.company_id = c.id
         WHERE u.email = $1`,
@@ -181,8 +191,8 @@ app.post('/api/login', loginLimiter, async (req, res) => {
       maxAge: rememberMe ? 7 * 24 * 60 * 60 * 1000 : undefined
     });
 
-    // Igual ao antigo: NÃO decide rota por perfil aqui
-    const baseUrl = (user.access_url || '').replace(/\/+$/, '');
+    // >>> monta a base via env + slug (ou access_url como fallback)
+    const baseUrl = tenantBaseUrl({ slug: user.slug, fallbackAccessUrl: user.access_url });
     const redirectUrl = `${baseUrl}?token=${token}`;
 
     res.json({
@@ -211,11 +221,12 @@ app.post('/api/logout', (req, res) => {
 // body: { email }
 app.post('/api/forgot-password', resetLimiter, async (req, res) => {
   const { email } = req.body || {};
-  if (!email) return res.json({ ok: true }); // resposta neutra
+  if (!email) return res.json({ ok: true });
 
   try {
     const q = await pool.query(
-      `SELECT u.id AS user_id, u.email, u.company_id, c.access_url
+      `SELECT u.id AS user_id, u.email, u.company_id,
+              c.slug, c.access_url
          FROM users u
          JOIN companies c ON c.id = u.company_id
         WHERE u.email = $1`,
@@ -235,7 +246,8 @@ app.post('/api/forgot-password', resetLimiter, async (req, res) => {
       [tokenId, row.user_id, row.company_id, 'reset', hash, expiresAt]
     );
 
-    const link = `${row.access_url.replace(/\/+$/,'')}/auth/set-password?token=${encodeURIComponent(`${tokenId}.${raw}`)}`;
+    const baseUrl = tenantBaseUrl({ slug: row.slug, fallbackAccessUrl: row.access_url });
+    const link = `${baseUrl.replace(/\/+$/,'')}/auth/set-password?token=${encodeURIComponent(`${tokenId}.${raw}`)}`;
 
     await sendMail({
       to: row.email,
@@ -261,8 +273,8 @@ app.post('/api/invite', async (req, res) => {
 
   try {
     const comp = companyId
-      ? await pool.query('SELECT id, access_url FROM companies WHERE id=$1', [companyId])
-      : await pool.query('SELECT id, access_url FROM companies WHERE slug=$1', [companySlug]);
+      ? await pool.query('SELECT id, slug, access_url FROM companies WHERE id=$1', [companyId])
+      : await pool.query('SELECT id, slug, access_url FROM companies WHERE slug=$1', [companySlug]);
     const company = comp.rows[0];
     if (!company) return res.status(404).json({ message: 'Empresa não encontrada' });
 
@@ -289,7 +301,8 @@ app.post('/api/invite', async (req, res) => {
       [tokenId, user.id, company.id, 'invite', hash, expiresAt]
     );
 
-    const link = `${company.access_url.replace(/\/+$/,'')}/auth/set-password?token=${encodeURIComponent(`${tokenId}.${raw}`)}`;
+    const baseUrl = tenantBaseUrl({ slug: company.slug, fallbackAccessUrl: company.access_url });
+    const link = `${baseUrl.replace(/\/+$/,'')}/auth/set-password?token=${encodeURIComponent(`${tokenId}.${raw}`)}`;
 
     await sendMail({
       to: user.email,
