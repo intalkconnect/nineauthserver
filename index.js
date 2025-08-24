@@ -220,25 +220,29 @@ app.post('/api/logout', (req, res) => {
 /* ============== Forgot password ============== */
 // body: { email }
 app.post('/api/forgot-password', resetLimiter, async (req, res) => {
-  const { email } = req.body || {};
-  if (!email) return res.json({ ok: true });
-
   try {
+    const { email } = req.body || {};
+    console.log('[forgot-password] origin=%s email=%s', req.headers.origin, email);
+
+    // Resposta neutra SEM vazar se existe ou não (sempre 200)
+    if (!email) return res.status(200).json({ ok: true });
+
     const q = await pool.query(
-      `SELECT u.id AS user_id, u.email, u.company_id,
-              c.slug, c.access_url
+      `SELECT u.id AS user_id, u.email, u.company_id, c.slug, c.access_url
          FROM users u
          JOIN companies c ON c.id = u.company_id
         WHERE u.email = $1`,
       [String(email).toLowerCase()]
     );
     const row = q.rows[0];
-    if (!row) return res.json({ ok: true });
+
+    // Mesmo se não existir usuário, responde 200 (neutro)
+    if (!row) return res.status(200).json({ ok: true });
 
     const raw = crypto.randomBytes(32).toString('base64url');
     const hash = await bcrypt.hash(raw, 12);
     const tokenId = uuidv4();
-    const expiresAt = new Date(Date.now() + minutes(30));
+    const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
 
     await pool.query(
       `INSERT INTO password_tokens (id, user_id, company_id, type, token_hash, expires_at)
@@ -257,12 +261,14 @@ app.post('/api/forgot-password', resetLimiter, async (req, res) => {
              <p>O link expira em 30 minutos.</p>`
     });
 
-    res.json({ ok: true });
+    return res.status(200).json({ ok: true });
   } catch (e) {
     console.error('forgot-password error', e);
-    res.json({ ok: true });
+    // Mesmo em erro, responder 200 e mensagem neutra
+    return res.status(200).json({ ok: true });
   }
 });
+
 
 /* ============== Invite (cria/garante user e envia set-password) ============== */
 // body: { email, companySlug | companyId, profile? }
@@ -380,3 +386,4 @@ app.use((err, req, res, next) => {
 /* ============== Start ============== */
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
