@@ -8,53 +8,70 @@ const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
 const crypto = require('crypto');
 const cookieParser = require('cookie-parser');
-// NEW
 const nodemailer = require('nodemailer');
 const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 
-// 1. Segurança
+/* ============== Segurança básica ============== */
 app.use(helmet());
 app.use(cookieParser());
+app.use(express.json({ limit: '10kb' }));
 
-// CORS
+/* ============== CORS dinâmico via .env (wildcards) ============== */
+const ORIGIN_PATTERNS = (process.env.ALLOWED_ORIGIN_PATTERNS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
+function isAllowedOrigin(origin) {
+  if (!origin) return true; // permite curl/postman (sem Origin)
+  let url;
+  try { url = new URL(origin); } catch { return false; }
+  const { protocol, hostname } = url;
+  if (protocol !== 'http:' && protocol !== 'https:') return false;
+
+  for (const pat of ORIGIN_PATTERNS) {
+    // Padrão exato com protocolo (http/https)
+    if (/^https?:\/\//i.test(pat)) {
+      if (origin === pat) return true;
+      continue;
+    }
+    // Base/wildcard: *.dkdevs.com.br ou dkdevs.com.br
+    const base = pat.replace(/^\*\./, '');
+    if (hostname === base || hostname.endsWith(`.${base}`)) return true;
+  }
+  return false;
+}
+
 const corsOptions = {
-  origin: (origin, callback) => {
-    const allowed = process.env.ALLOWED_ORIGINS
-      ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
-      : [];
-    if (!origin || allowed.includes(origin)) callback(null, true);
+  origin: (origin, cb) => {
+    if (isAllowedOrigin(origin)) cb(null, true);
     else {
       console.error(`⛔ CORS bloqueado para origem: ${origin}`);
-      callback(new Error('Not allowed by CORS'));
+      cb(new Error('Not allowed by CORS'));
     }
   },
   credentials: true,
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'CSRF-Token'],
-  exposedHeaders: ['CSRF-Token']
+  exposedHeaders: ['CSRF-Token'],
 };
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions));
+app.options('*', cors(corsOptions)); // pré-flight
 
-app.use(express.json({ limit: '10kb' }));
-
-// 2. Rate Limiting
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, max: 100, message: 'Too many requests from this IP'
+/* ============== Banco ============== */
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: false, // ajuste para seu provedor (true em alguns PaaS)
 });
-app.use('/api/login', limiter);
 
-// 3. Postgres
-const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: false });
-
-// NEW: mailer
+/* ============== E-mail ============== */
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
   port: Number(process.env.SMTP_PORT || 587),
   secure: Number(process.env.SMTP_PORT) === 465,
-  auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
+  auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
 });
 async function sendMail({ to, subject, html }) {
   return transporter.sendMail({
@@ -65,33 +82,49 @@ async function sendMail({ to, subject, html }) {
         ${html}
         <hr/>
         <p style="color:#666;font-size:12px">Se você não solicitou, ignore este e-mail.</p>
-      </div>`
+      </div>`,
   });
 }
 
-// Helpers
+/* ============== Utils & rate limits ============== */
 const now = () => new Date();
 const minutes = n => n * 60 * 1000;
 const hours = n => n * 60 * 60 * 1000;
 
-// 4. CSRF
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+const resetLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+/* ============== CSRF ============== */
 app.get('/api/csrf-token', (req, res) => {
   const csrfToken = crypto.randomBytes(32).toString('hex');
   res.cookie('XSRF-TOKEN', csrfToken, {
-    secure: true, httpOnly: false, sameSite: 'None', maxAge: 86400000
+    secure: (process.env.CSRF_COOKIE_SECURE || 'true') !== 'false',
+    httpOnly: false,
+    sameSite: 'None',
+    maxAge: 86400000,
   });
   res.json({ token: csrfToken });
 });
 
-// 5. Login (mantém seu fluxo)
-app.post('/api/login', async (req, res) => {
+/* ============== Login / Logout ============== */
+app.post('/api/login', loginLimiter, async (req, res) => {
   const { email, password, rememberMe } = req.body;
 
   // CSRF
   const csrfHeader = req.headers['csrf-token'];
   if (!csrfHeader || csrfHeader !== req.cookies['XSRF-TOKEN']) {
     return res.status(403).json({ message: 'Token CSRF inválido' });
-  }
+    }
 
   try {
     const result = await pool.query(
@@ -118,8 +151,10 @@ app.post('/api/login', async (req, res) => {
       await pool.query(
         `UPDATE users
             SET login_attempts = login_attempts + 1,
-                locked_until = CASE WHEN login_attempts + 1 >= 5
-                                    THEN NOW() + INTERVAL '30 minutes' ELSE locked_until END
+                locked_until = CASE
+                  WHEN login_attempts + 1 >= 5 THEN NOW() + INTERVAL '30 minutes'
+                  ELSE locked_until
+                END
           WHERE email = $1`,
         [email]
       );
@@ -150,7 +185,6 @@ app.post('/api/login', async (req, res) => {
       redirectUrl: `${user.access_url}?token=${token}`,
       user: { id: user.id, email: user.email, profile: user.profile }
     });
-
   } catch (err) {
     console.error('Erro no login:', err);
     res.status(500).json({ message: 'Erro no servidor' });
@@ -159,21 +193,21 @@ app.post('/api/login', async (req, res) => {
 
 app.post('/api/logout', (req, res) => {
   res.clearCookie('authToken', {
-    httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'strict'
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'strict',
   });
   res.json({ message: 'Logout realizado com sucesso' });
 });
 
-// ============== NOVAS ROTAS (reset/convite) ==============
-
-// /api/forgot-password  { email }
-app.post('/api/forgot-password', async (req, res) => {
+/* ============== Forgot password ============== */
+app.post('/api/forgot-password', resetLimiter, async (req, res) => {
   const { email } = req.body || {};
-  if (!email) return res.json({ ok: true }); // resposta genérica
+  if (!email) return res.json({ ok: true });
 
   try {
     const q = await pool.query(
-      `SELECT u.id as user_id, u.email, u.company_id, c.access_url
+      `SELECT u.id AS user_id, u.email, u.company_id, c.access_url
          FROM users u
          JOIN companies c ON c.id = u.company_id
         WHERE u.email = $1`,
@@ -210,21 +244,19 @@ app.post('/api/forgot-password', async (req, res) => {
   }
 });
 
-// /api/invite  { email, companySlug | companyId }
+/* ============== Invite ============== */
 app.post('/api/invite', async (req, res) => {
   const { email, companySlug, companyId } = req.body || {};
   if (!email || (!companySlug && !companyId))
     return res.status(400).json({ message: 'email e companySlug/companyId são obrigatórios' });
 
   try {
-    // resolve empresa
     const comp = companyId
       ? await pool.query('SELECT id, access_url FROM companies WHERE id=$1', [companyId])
       : await pool.query('SELECT id, access_url FROM companies WHERE slug=$1', [companySlug]);
     const company = comp.rows[0];
     if (!company) return res.status(404).json({ message: 'Empresa não encontrada' });
 
-    // garante usuário
     const lower = String(email).toLowerCase();
     const u = await pool.query(
       `INSERT INTO users (company_id, email)
@@ -235,7 +267,6 @@ app.post('/api/invite', async (req, res) => {
     );
     const user = u.rows[0];
 
-    // cria token de convite
     const raw = crypto.randomBytes(32).toString('base64url');
     const hash = await bcrypt.hash(raw, 12);
     const tokenId = uuidv4();
@@ -264,21 +295,21 @@ app.post('/api/invite', async (req, res) => {
   }
 });
 
-// /api/set-password  { token, newPassword }
+/* ============== Set password ============== */
 app.post('/api/set-password', async (req, res) => {
   const { token, newPassword } = req.body || {};
   if (!token || !newPassword || String(newPassword).length < 8)
     return res.status(400).json({ message: 'token e senha (mín. 8) são obrigatórios' });
 
-  try {
-    const [tokenId, raw] = String(token).split('.');
-    if (!tokenId || !raw) return res.status(400).json({ message: 'Token inválido' });
+  const [tokenId, raw] = String(token).split('.');
+  if (!tokenId || !raw) return res.status(400).json({ message: 'Token inválido' });
 
-    // busca token válido
-    const q = await pool.query(
-      `SELECT pt.id, pt.user_id, pt.token_hash, pt.expires_at, pt.used_at
-         FROM password_tokens pt
-        WHERE pt.id = $1`,
+  const client = await pool.connect();
+  try {
+    const q = await client.query(
+      `SELECT id, user_id, token_hash, expires_at, used_at
+         FROM password_tokens
+        WHERE id = $1`,
       [tokenId]
     );
     const rec = q.rows[0];
@@ -290,35 +321,37 @@ app.post('/api/set-password', async (req, res) => {
 
     const pwdHash = await bcrypt.hash(String(newPassword), 12);
 
-    await pool.query('BEGIN');
-    await pool.query(
+    await client.query('BEGIN');
+    await client.query(
       'UPDATE users SET password = $1, updated_at = NOW() WHERE id = $2',
       [pwdHash, rec.user_id]
     );
-    await pool.query(
+    await client.query(
       'UPDATE password_tokens SET used_at = NOW() WHERE id = $1',
       [rec.id]
     );
-    await pool.query('COMMIT');
+    await client.query('COMMIT');
 
     res.json({ ok: true });
   } catch (e) {
-    await pool.query('ROLLBACK').catch(()=>{});
+    await client.query('ROLLBACK').catch(()=>{});
     console.error('set-password error', e);
     res.status(500).json({ message: 'Erro no servidor' });
+  } finally {
+    client.release();
   }
 });
 
-// 6. Health
+/* ============== Health & errors ============== */
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', env: process.env.NODE_ENV });
 });
 
-// 7. Erros
 app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(500).json({ message: 'Internal server error' });
 });
 
+/* ============== Start ============== */
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
