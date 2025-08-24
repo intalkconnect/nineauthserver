@@ -1,3 +1,4 @@
+// index.js (sem bootstrap)
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -12,49 +13,41 @@ const nodemailer = require('nodemailer');
 const { v4: uuidv4 } = require('uuid');
 
 const app = express();
+app.set('trust proxy', 1); // atrás de proxy (Railway/Nginx/etc.)
 
-/* ============== Segurança básica ============== */
+/* ============== Segurança & body ============== */
 app.use(helmet());
 app.use(cookieParser());
 app.use(express.json({ limit: '10kb' }));
 
-/* ============== CORS dinâmico via .env (wildcards) ============== */
+/* ============== CORS via .env (wildcards suportados) ==============
+   .env exemplo:
+   ALLOWED_ORIGIN_PATTERNS=https://hubclient-blue.vercel.app,*.dkdevs.com.br,dkdevs.com.br,http://localhost:5173
+*/
 const RAW_PATTERNS =
   process.env.ALLOWED_ORIGIN_PATTERNS ||
-  process.env.ALLOWED_ORIGINS || // fallback
+  process.env.ALLOWED_ORIGINS || // fallback p/ compat
   '';
 
-const ORIGIN_PATTERNS = RAW_PATTERNS.split(',')
-  .map(s => s.trim())
-  .filter(Boolean);
-
+const ORIGIN_PATTERNS = RAW_PATTERNS.split(',').map(s => s.trim()).filter(Boolean);
 console.log('[CORS] patterns:', ORIGIN_PATTERNS);
 
-function normalizeOrigin(s) {
-  // remove barra final e força lowercase
-  return s.replace(/\/+$/, '').toLowerCase();
-}
-
+function normalizeOrigin(s) { return String(s || '').replace(/\/+$/, '').toLowerCase(); }
 function isAllowedOrigin(origin) {
   if (!origin) return true; // curl/postman
-  let url;
-  try { url = new URL(origin); } catch { return false; }
+  let url; try { url = new URL(origin); } catch { return false; }
   const proto = url.protocol.toLowerCase();
-  const host = url.hostname.toLowerCase();
+  const host  = url.hostname.toLowerCase();
   const normalizedOrigin = normalizeOrigin(origin);
-
   if (proto !== 'http:' && proto !== 'https:') return false;
 
-  for (const patRaw of ORIGIN_PATTERNS) {
-    const pat = normalizeOrigin(patRaw);
-
-    // 1) exato com protocolo (http/https)
-    if (/^https?:\/\//i.test(pat)) {
+  for (const raw of ORIGIN_PATTERNS) {
+    const pat = normalizeOrigin(raw);
+    if (/^https?:\/\//i.test(pat)) { // origin exato
       if (normalizedOrigin === pat) return true;
       continue;
     }
-    // 2) wildcard/base: *.dkdevs.com.br ou dkdevs.com.br
-    const base = pat.replace(/^\*\./, '');
+    const base = pat.replace(/^\*\./, ''); // *.dkdevs.com.br -> dkdevs.com.br
     if (host === base || host.endsWith(`.${base}`)) return true;
   }
   return false;
@@ -62,8 +55,7 @@ function isAllowedOrigin(origin) {
 
 const corsOptions = {
   origin: (origin, cb) => {
-    const ok = isAllowedOrigin(origin);
-    if (ok) cb(null, true);
+    if (isAllowedOrigin(origin)) cb(null, true);
     else {
       console.error('⛔ CORS bloqueado para origem:', origin);
       cb(new Error('Not allowed by CORS'));
@@ -77,11 +69,10 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 
-
 /* ============== Banco ============== */
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: false, // ajuste para seu provedor (true em alguns PaaS)
+  ssl: false, // ajuste p/ seu provedor (alguns exigem { rejectUnauthorized:false })
 });
 
 /* ============== E-mail ============== */
@@ -100,49 +91,43 @@ async function sendMail({ to, subject, html }) {
         ${html}
         <hr/>
         <p style="color:#666;font-size:12px">Se você não solicitou, ignore este e-mail.</p>
-      </div>`,
+      </div>`
   });
 }
 
-/* ============== Utils & rate limits ============== */
+/* ============== Utils & rate limit ============== */
 const now = () => new Date();
 const minutes = n => n * 60 * 1000;
-const hours = n => n * 60 * 60 * 1000;
+const hours   = n => n * 60 * 60 * 1000;
 
 const loginLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100,
-  standardHeaders: true,
-  legacyHeaders: false,
+  windowMs: 15 * 60 * 1000, max: 100, standardHeaders: true, legacyHeaders: false,
 });
 const resetLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000,
-  max: 20,
-  standardHeaders: true,
-  legacyHeaders: false,
+  windowMs: 60 * 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false,
 });
 
 /* ============== CSRF ============== */
 app.get('/api/csrf-token', (req, res) => {
   const csrfToken = crypto.randomBytes(32).toString('hex');
   res.cookie('XSRF-TOKEN', csrfToken, {
-    secure: (process.env.CSRF_COOKIE_SECURE || 'true') !== 'false',
+    secure: (process.env.CSRF_COOKIE_SECURE || 'true') !== 'false', // true em cross-domain
     httpOnly: false,
     sameSite: 'None',
-    maxAge: 86400000,
+    maxAge: 86400000
   });
   res.json({ token: csrfToken });
 });
 
-/* ============== Login / Logout ============== */
+/* ============== LOGIN (igual ao antigo) ============== */
 app.post('/api/login', loginLimiter, async (req, res) => {
   const { email, password, rememberMe } = req.body;
 
-  // CSRF
+  // CSRF como no antigo
   const csrfHeader = req.headers['csrf-token'];
   if (!csrfHeader || csrfHeader !== req.cookies['XSRF-TOKEN']) {
     return res.status(403).json({ message: 'Token CSRF inválido' });
-    }
+  }
 
   try {
     const result = await pool.query(
@@ -169,10 +154,8 @@ app.post('/api/login', loginLimiter, async (req, res) => {
       await pool.query(
         `UPDATE users
             SET login_attempts = login_attempts + 1,
-                locked_until = CASE
-                  WHEN login_attempts + 1 >= 5 THEN NOW() + INTERVAL '30 minutes'
-                  ELSE locked_until
-                END
+                locked_until = CASE WHEN login_attempts + 1 >= 5
+                                    THEN NOW() + INTERVAL '30 minutes' ELSE NULL END
           WHERE email = $1`,
         [email]
       );
@@ -198,30 +181,37 @@ app.post('/api/login', loginLimiter, async (req, res) => {
       maxAge: rememberMe ? 7 * 24 * 60 * 60 * 1000 : undefined
     });
 
+    // Igual ao antigo: NÃO decide rota por perfil aqui
+    const baseUrl = (user.access_url || '').replace(/\/+$/, '');
+    const redirectUrl = `${baseUrl}?token=${token}`;
+
     res.json({
       token,
-      redirectUrl: `${user.access_url}?token=${token}`,
+      redirectUrl,
       user: { id: user.id, email: user.email, profile: user.profile }
     });
+
   } catch (err) {
     console.error('Erro no login:', err);
     res.status(500).json({ message: 'Erro no servidor' });
   }
 });
 
+/* ============== Logout ============== */
 app.post('/api/logout', (req, res) => {
   res.clearCookie('authToken', {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict',
+    sameSite: 'strict'
   });
   res.json({ message: 'Logout realizado com sucesso' });
 });
 
 /* ============== Forgot password ============== */
+// body: { email }
 app.post('/api/forgot-password', resetLimiter, async (req, res) => {
   const { email } = req.body || {};
-  if (!email) return res.json({ ok: true });
+  if (!email) return res.json({ ok: true }); // resposta neutra
 
   try {
     const q = await pool.query(
@@ -262,9 +252,10 @@ app.post('/api/forgot-password', resetLimiter, async (req, res) => {
   }
 });
 
-/* ============== Invite ============== */
+/* ============== Invite (cria/garante user e envia set-password) ============== */
+// body: { email, companySlug | companyId, profile? }
 app.post('/api/invite', async (req, res) => {
-  const { email, companySlug, companyId } = req.body || {};
+  const { email, companySlug, companyId, profile } = req.body || {};
   if (!email || (!companySlug && !companyId))
     return res.status(400).json({ message: 'email e companySlug/companyId são obrigatórios' });
 
@@ -277,11 +268,13 @@ app.post('/api/invite', async (req, res) => {
 
     const lower = String(email).toLowerCase();
     const u = await pool.query(
-      `INSERT INTO users (company_id, email)
-       VALUES ($1,$2)
-       ON CONFLICT (company_id, email) DO UPDATE SET updated_at = NOW()
-       RETURNING id, email`,
-      [company.id, lower]
+      `INSERT INTO users (company_id, email, profile)
+       VALUES ($1,$2,COALESCE($3,'user'))
+       ON CONFLICT (company_id, email) DO UPDATE
+         SET updated_at = NOW(),
+             profile = COALESCE(EXCLUDED.profile, users.profile)
+       RETURNING id, email, profile`,
+      [company.id, lower, profile || null]
     );
     const user = u.rows[0];
 
@@ -314,6 +307,7 @@ app.post('/api/invite', async (req, res) => {
 });
 
 /* ============== Set password ============== */
+// body: { token, newPassword }  (token = tokenId.raw)
 app.post('/api/set-password', async (req, res) => {
   const { token, newPassword } = req.body || {};
   if (!token || !newPassword || String(newPassword).length < 8)
@@ -373,4 +367,3 @@ app.use((err, req, res, next) => {
 /* ============== Start ============== */
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-
