@@ -250,8 +250,14 @@ app.post('/api/forgot-password', resetLimiter, async (req, res) => {
       [tokenId, row.user_id, row.company_id, 'reset', hash, expiresAt]
     );
 
-    const baseUrl = tenantBaseUrl({ slug: row.slug, fallbackAccessUrl: row.access_url });
-    const link = `${baseUrl.replace(/\/+$/,'')}/auth/set-password?token=${encodeURIComponent(`${tokenId}.${raw}`)}`;
+const tokenValue = `${tokenId}.${raw}`;
+const resetBase = (process.env.RESET_BASE_URL || '').replace(/\/+$/, '');
+
+const link = resetBase
+  ? `${resetBase}/auth/set-password?token=${encodeURIComponent(tokenValue)}`
+  : `${tenantBaseUrl({ slug: row.slug, fallbackAccessUrl: row.access_url })
+       .replace(/\/+$/,'')}/auth/set-password?token=${encodeURIComponent(tokenValue)}`;
+
 
     await sendMail({
       to: row.email,
@@ -307,8 +313,14 @@ app.post('/api/invite', async (req, res) => {
       [tokenId, user.id, company.id, 'invite', hash, expiresAt]
     );
 
-    const baseUrl = tenantBaseUrl({ slug: company.slug, fallbackAccessUrl: company.access_url });
-    const link = `${baseUrl.replace(/\/+$/,'')}/auth/set-password?token=${encodeURIComponent(`${tokenId}.${raw}`)}`;
+const tokenValue = `${tokenId}.${raw}`;
+const resetBase = (process.env.RESET_BASE_URL || '').replace(/\/+$/, '');
+
+const link = resetBase
+  ? `${resetBase}/auth/set-password?token=${encodeURIComponent(tokenValue)}`
+  : `${tenantBaseUrl({ slug: company.slug, fallbackAccessUrl: company.access_url })
+       .replace(/\/+$/,'')}/auth/set-password?token=${encodeURIComponent(tokenValue)}`;
+
 
     await sendMail({
       to: user.email,
@@ -386,4 +398,5 @@ app.use((err, req, res, next) => {
 /* ============== Start ============== */
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
 
