@@ -19,46 +19,64 @@ app.use(cookieParser());
 app.use(express.json({ limit: '10kb' }));
 
 /* ============== CORS dinâmico via .env (wildcards) ============== */
-const ORIGIN_PATTERNS = (process.env.ALLOWED_ORIGIN_PATTERNS || '')
-  .split(',')
+const RAW_PATTERNS =
+  process.env.ALLOWED_ORIGIN_PATTERNS ||
+  process.env.ALLOWED_ORIGINS || // fallback
+  '';
+
+const ORIGIN_PATTERNS = RAW_PATTERNS.split(',')
   .map(s => s.trim())
   .filter(Boolean);
 
+console.log('[CORS] patterns:', ORIGIN_PATTERNS);
+
+function normalizeOrigin(s) {
+  // remove barra final e força lowercase
+  return s.replace(/\/+$/, '').toLowerCase();
+}
+
 function isAllowedOrigin(origin) {
-  if (!origin) return true; // permite curl/postman (sem Origin)
+  if (!origin) return true; // curl/postman
   let url;
   try { url = new URL(origin); } catch { return false; }
-  const { protocol, hostname } = url;
-  if (protocol !== 'http:' && protocol !== 'https:') return false;
+  const proto = url.protocol.toLowerCase();
+  const host = url.hostname.toLowerCase();
+  const normalizedOrigin = normalizeOrigin(origin);
 
-  for (const pat of ORIGIN_PATTERNS) {
-    // Padrão exato com protocolo (http/https)
+  if (proto !== 'http:' && proto !== 'https:') return false;
+
+  for (const patRaw of ORIGIN_PATTERNS) {
+    const pat = normalizeOrigin(patRaw);
+
+    // 1) exato com protocolo (http/https)
     if (/^https?:\/\//i.test(pat)) {
-      if (origin === pat) return true;
+      if (normalizedOrigin === pat) return true;
       continue;
     }
-    // Base/wildcard: *.dkdevs.com.br ou dkdevs.com.br
+    // 2) wildcard/base: *.dkdevs.com.br ou dkdevs.com.br
     const base = pat.replace(/^\*\./, '');
-    if (hostname === base || hostname.endsWith(`.${base}`)) return true;
+    if (host === base || host.endsWith(`.${base}`)) return true;
   }
   return false;
 }
 
 const corsOptions = {
   origin: (origin, cb) => {
-    if (isAllowedOrigin(origin)) cb(null, true);
+    const ok = isAllowedOrigin(origin);
+    if (ok) cb(null, true);
     else {
-      console.error(`⛔ CORS bloqueado para origem: ${origin}`);
+      console.error('⛔ CORS bloqueado para origem:', origin);
       cb(new Error('Not allowed by CORS'));
     }
   },
   credentials: true,
   methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'CSRF-Token'],
+  allowedHeaders: ['Content-Type', 'CSRF-Token', 'csrf-token'],
   exposedHeaders: ['CSRF-Token'],
 };
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions)); // pré-flight
+app.options('*', cors(corsOptions));
+
 
 /* ============== Banco ============== */
 const pool = new Pool({
@@ -355,3 +373,4 @@ app.use((err, req, res, next) => {
 /* ============== Start ============== */
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
