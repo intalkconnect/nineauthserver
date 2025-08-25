@@ -1,6 +1,7 @@
 // index.js
 require('dotenv').config();
 const path = require('path');
+const fs = require('fs');
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcrypt');
@@ -84,17 +85,44 @@ const BRAND = {
   muted: '#6B7280',
   border: '#E5E7EB',
 };
-const logoPath = path.join(__dirname, 'ninechat_logo_icons.png');
 
-function logoAttachment() {
-  return [{
-    filename: 'ninechat-logo.png',
-    path: logoPath,
-    cid: 'ninechat-logo'
-  }];
+// Opções de logo:
+// 1) arquivo local ao lado do index.js (padrão)
+// 2) variável SMTP_LOGO_URL (https://...)
+// 3) inline base64 (somente se LOGO_INLINE_BASE64 estiver setado)
+const localLogoPath = path.join(__dirname, 'ninechat_logo_icons.png');
+const SMTP_LOGO_URL = process.env.SMTP_LOGO_URL || '';
+
+function prepareLogo() {
+  const existsLocal = fs.existsSync(localLogoPath);
+  const useInline = !!process.env.LOGO_INLINE_BASE64; // opcional
+  if (useInline && existsLocal) {
+    try {
+      const buf = fs.readFileSync(localLogoPath);
+      const b64 = buf.toString('base64');
+      console.log('[MAIL:logo] usando inline base64 (local file).');
+      return { mode: 'inline', tag: `<img src="data:image/png;base64,${b64}" width="64" height="64" alt="${BRAND.name}"/>`, attachments: undefined };
+    } catch (e) {
+      console.warn('[MAIL:logo] falha ao ler inline base64, caindo para CID/URL.', e.message);
+    }
+  }
+  if (existsLocal) {
+    console.log('[MAIL:logo] usando CID com arquivo local:', localLogoPath);
+    return {
+      mode: 'cid',
+      tag: `<img src="cid:ninechat-logo" width="64" height="64" alt="${BRAND.name}"/>`,
+      attachments: [{ filename: 'ninechat-logo.png', path: localLogoPath, cid: 'ninechat-logo' }]
+    };
+  }
+  if (SMTP_LOGO_URL) {
+    console.log('[MAIL:logo] arquivo local ausente. Usando URL:', SMTP_LOGO_URL);
+    return { mode: 'url', tag: `<img src="${SMTP_LOGO_URL}" width="64" height="64" alt="${BRAND.name}"/>`, attachments: undefined };
+  }
+  console.warn('[MAIL:logo] sem arquivo local e sem SMTP_LOGO_URL — enviando sem imagem.');
+  return { mode: 'none', tag: '', attachments: undefined };
 }
 
-function baseLayout({ preheader, bodyHtml }) {
+function baseLayout({ preheader, bodyHtml, logoTag }) {
   // preheader escondido
   return `
   <html><body style="margin:0;padding:0;background:#F3F4F6;">
@@ -106,7 +134,7 @@ function baseLayout({ preheader, bodyHtml }) {
         <table role="presentation" width="560" cellpadding="0" cellspacing="0"
                style="background:#fff;border:1px solid ${BRAND.border};border-radius:16px;overflow:hidden">
           <tr><td align="center" style="background:linear-gradient(135deg, ${BRAND.gradientFrom}, ${BRAND.gradientTo});padding:28px 24px">
-            <img src="cid:ninechat-logo" width="64" height="64" alt="${BRAND.name}"/>
+            ${logoTag || ''}
             <div style="font:600 18px system-ui;color:#fff;margin-top:10px">${BRAND.name}</div>
           </td></tr>
           <tr><td style="padding:28px">
@@ -126,6 +154,7 @@ function ctaButton({ href, label }) {
 }
 
 function renderInviteEmail({ link }) {
+  const { tag: logoTag, attachments } = prepareLogo();
   const subject = `Boas-vindas ao ${BRAND.name} — defina sua senha`;
   const preheader = `Sua conta no ${BRAND.name} foi criada.`;
   const bodyHtml = `
@@ -136,10 +165,11 @@ function renderInviteEmail({ link }) {
     ${ctaButton({ href: link, label: 'Definir senha' })}
     <p style="font:12px system-ui;color:${BRAND.muted};margin:16px 0 0">Se você não solicitou, ignore este e-mail.</p>
   `;
-  return { subject, html: baseLayout({ preheader, bodyHtml }), attachments: logoAttachment() };
+  return { subject, html: baseLayout({ preheader, bodyHtml, logoTag }), attachments };
 }
 
 function renderResetEmail({ link }) {
+  const { tag: logoTag, attachments } = prepareLogo();
   const subject = `Redefinição de senha — ${BRAND.name}`;
   const preheader = `Use o link para redefinir sua senha (30 min).`;
   const bodyHtml = `
@@ -150,7 +180,7 @@ function renderResetEmail({ link }) {
     ${ctaButton({ href: link, label: 'Criar nova senha' })}
     <p style="font:12px system-ui;color:${BRAND.muted};margin:16px 0 0">Se você não solicitou, ignore este e-mail.</p>
   `;
-  return { subject, html: baseLayout({ preheader, bodyHtml }), attachments: logoAttachment() };
+  return { subject, html: baseLayout({ preheader, bodyHtml, logoTag }), attachments };
 }
 
 /* ====================== E-mail (Nodemailer com debug/verify) ====================== */
@@ -182,7 +212,7 @@ transporter.verify((err) => {
 
 async function sendMail({ to, subject, html, attachments }) {
   if (!SMTP_FROM) throw new Error('SMTP_FROM ausente');
-  console.log(`[MAIL] -> to=${to} subject="${subject}"`);
+  console.log(`[MAIL] -> to=${to} subject="${subject}" attachments=${attachments?.length || 0}`);
   const info = await transporter.sendMail({ from: SMTP_FROM, to, subject, html, attachments });
   console.log('[MAIL] accepted=%j rejected=%j response=%s id=%s',
     info.accepted, info.rejected, info.response || '', info.messageId);
@@ -202,9 +232,6 @@ const resetLimiter = rateLimit({
 });
 
 /* ====================== Helpers de URL ====================== */
-// Preferência:
-// 1) TENANT_DOMAIN_BASE -> https://{slug}.{base}
-// 2) fallback access_url do banco
 function tenantBaseUrl({ slug, fallbackAccessUrl }) {
   const base = process.env.TENANT_DOMAIN_BASE;
   if (base) return `https://${slug}.${base}`;
@@ -332,6 +359,7 @@ app.post('/api/forgot-password', resetLimiter, async (req, res) => {
     console.log('[forgot-password] reset link:', link);
 
     const tpl = renderResetEmail({ link });
+    console.log('[forgot-password] template=reset attachments=%d', tpl.attachments?.length || 0);
     await sendMail({ to: row.email, subject: tpl.subject, html: tpl.html, attachments: tpl.attachments });
 
     return res.status(200).json({ ok: true });
@@ -383,6 +411,7 @@ app.post('/api/invite', async (req, res) => {
     console.log('[invite] invite link:', link);
 
     const tpl = renderInviteEmail({ link });
+    console.log('[invite] template=invite attachments=%d', tpl.attachments?.length || 0);
     await sendMail({ to: user.email, subject: tpl.subject, html: tpl.html, attachments: tpl.attachments });
 
     res.json({ ok: true });
@@ -457,7 +486,7 @@ app.get('/api/test-mail', async (req, res) => {
     const tokenValue = 'teste.token';
     const link = buildResetLink({ slug: 'hmg', accessUrl: '', tokenValue });
 
-    const { subject, html, attachments } = renderInviteEmail({ link }); // usa o de boas-vindas só pra validar layout
+    const { subject, html, attachments } = renderInviteEmail({ link }); // usa o de boas-vindas
     const info = await sendMail({ to, subject: `[TESTE] ${subject}`, html, attachments });
 
     res.json({ ok: true, messageId: info.messageId, response: info.response || null });
@@ -472,7 +501,6 @@ app.get('/api/test-mail', async (req, res) => {
  * DELETE /api/users
  * body: { email, companySlug | companyId }
  * Remove o usuário da tabela "users" (public) pelo par (company_id, email).
- * Útil quando a exclusão foi feita em outro serviço e você quer refletir aqui.
  */
 app.delete('/api/users', async (req, res) => {
   try {
