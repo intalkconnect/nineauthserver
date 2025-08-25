@@ -1,5 +1,6 @@
 // index.js
 require('dotenv').config();
+const path = require('path');
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcrypt');
@@ -13,18 +14,17 @@ const nodemailer = require('nodemailer');
 const { v4: uuidv4 } = require('uuid');
 
 const app = express();
-app.set('trust proxy', 1); // atrás de proxy (Railway/Nginx/etc.)
+app.set('trust proxy', 1);
 
-/* ============== Segurança & body ============== */
+/* ====================== Segurança & Body ====================== */
 app.use(helmet());
 app.use(cookieParser());
 app.use(express.json({ limit: '10kb' }));
 
-/* ============== CORS via .env (wildcards suportados) ============== */
+/* ====================== CORS (wildcards via .env) ====================== */
 const RAW_PATTERNS =
   process.env.ALLOWED_ORIGIN_PATTERNS ||
   process.env.ALLOWED_ORIGINS || '';
-
 const ORIGIN_PATTERNS = RAW_PATTERNS.split(',').map(s => s.trim()).filter(Boolean);
 console.log('[CORS] patterns:', ORIGIN_PATTERNS);
 
@@ -39,7 +39,7 @@ function isAllowedOrigin(origin) {
 
   for (const raw of ORIGIN_PATTERNS) {
     const pat = normalizeOrigin(raw);
-    if (/^https?:\/\//i.test(pat)) { // origin exato
+    if (/^https?:\/\//i.test(pat)) { // origem exata
       if (normalizedOrigin === pat) return true;
       continue;
     }
@@ -58,83 +58,138 @@ const corsOptions = {
     }
   },
   credentials: true,
-  methods: ['GET', 'POST', 'OPTIONS'],
+  methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'CSRF-Token', 'csrf-token'],
   exposedHeaders: ['CSRF-Token'],
 };
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 
-/* ============== Banco ============== */
+/* ====================== Banco ====================== */
 if (!process.env.DATABASE_URL) {
-  console.warn('⚠️  DATABASE_URL não definido. O servidor subirá, mas rotas que usam DB falharão.');
+  console.warn('⚠️  DATABASE_URL não definido. Rotas que usam DB vão falhar.');
 }
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: false, // ajuste p/ seu provedor
+  ssl: false, // ajuste se seu provedor exigir
 });
 
-/* ============== E-mail (Nodemailer com debug + verify) ============== */
-const SMTP_FROM = process.env.SMTP_FROM || (process.env.SMTP_USER ? `"Portal" <${process.env.SMTP_USER}>` : undefined);
+/* ====================== Marca / Templates NineChat ====================== */
+const BRAND = {
+  name: 'NineChat',
+  primary: '#635BFF',
+  gradientFrom: '#6a61ff',
+  gradientTo: '#2db6ff',
+  text: '#111827',
+  muted: '#6B7280',
+  border: '#E5E7EB',
+};
+const logoPath = path.join(__dirname, 'ninechat_logo_icons.png');
+
+function logoAttachment() {
+  return [{
+    filename: 'ninechat-logo.png',
+    path: logoPath,
+    cid: 'ninechat-logo'
+  }];
+}
+
+function baseLayout({ preheader, bodyHtml }) {
+  // preheader escondido
+  return `
+  <html><body style="margin:0;padding:0;background:#F3F4F6;">
+    <div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent">
+      ${preheader || ''}
+    </div>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="padding:24px 0;">
+      <tr><td align="center">
+        <table role="presentation" width="560" cellpadding="0" cellspacing="0"
+               style="background:#fff;border:1px solid ${BRAND.border};border-radius:16px;overflow:hidden">
+          <tr><td align="center" style="background:linear-gradient(135deg, ${BRAND.gradientFrom}, ${BRAND.gradientTo});padding:28px 24px">
+            <img src="cid:ninechat-logo" width="64" height="64" alt="${BRAND.name}"/>
+            <div style="font:600 18px system-ui;color:#fff;margin-top:10px">${BRAND.name}</div>
+          </td></tr>
+          <tr><td style="padding:28px">
+            ${bodyHtml}
+          </td></tr>
+          <tr><td style="padding:12px 28px 28px;border-top:1px solid ${BRAND.border};color:${BRAND.muted};font:12px system-ui">
+            © ${new Date().getFullYear()} ${BRAND.name}. Todos os direitos reservados.
+          </td></tr>
+        </table>
+      </td></tr>
+    </table>
+  </body></html>`;
+}
+
+function ctaButton({ href, label }) {
+  return `<a href="${href}" style="display:inline-block;padding:12px 20px;border-radius:10px;background:${BRAND.primary};color:#fff;font:600 15px system-ui;text-decoration:none">${label}</a>`;
+}
+
+function renderInviteEmail({ link }) {
+  const subject = `Boas-vindas ao ${BRAND.name} — defina sua senha`;
+  const preheader = `Sua conta no ${BRAND.name} foi criada.`;
+  const bodyHtml = `
+    <h2 style="font:600 20px system-ui;color:${BRAND.text};margin:0 0 8px">Bem-vindo!</h2>
+    <p style="font:14px system-ui;color:${BRAND.muted};margin:0 0 16px">
+      Sua conta foi criada. Defina sua senha clicando no botão abaixo. O link expira em 24 horas.
+    </p>
+    ${ctaButton({ href: link, label: 'Definir senha' })}
+    <p style="font:12px system-ui;color:${BRAND.muted};margin:16px 0 0">Se você não solicitou, ignore este e-mail.</p>
+  `;
+  return { subject, html: baseLayout({ preheader, bodyHtml }), attachments: logoAttachment() };
+}
+
+function renderResetEmail({ link }) {
+  const subject = `Redefinição de senha — ${BRAND.name}`;
+  const preheader = `Use o link para redefinir sua senha (30 min).`;
+  const bodyHtml = `
+    <h2 style="font:600 20px system-ui;color:${BRAND.text};margin:0 0 8px">Redefinir senha</h2>
+    <p style="font:14px system-ui;color:${BRAND.muted};margin:0 0 16px">
+      Recebemos um pedido para redefinir sua senha. Este link expira em 30 minutos.
+    </p>
+    ${ctaButton({ href: link, label: 'Criar nova senha' })}
+    <p style="font:12px system-ui;color:${BRAND.muted};margin:16px 0 0">Se você não solicitou, ignore este e-mail.</p>
+  `;
+  return { subject, html: baseLayout({ preheader, bodyHtml }), attachments: logoAttachment() };
+}
+
+/* ====================== E-mail (Nodemailer com debug/verify) ====================== */
+const SMTP_FROM = process.env.SMTP_FROM || (process.env.SMTP_USER ? `"${BRAND.name}" <${process.env.SMTP_USER}>` : undefined);
 if (!process.env.SMTP_HOST || !process.env.SMTP_PORT || !process.env.SMTP_USER) {
-  console.warn('⚠️  Variáveis SMTP ausentes (SMTP_HOST/SMTP_PORT/SMTP_USER). Envio de e-mail vai falhar.');
+  console.warn('⚠️  Variáveis SMTP ausentes (SMTP_HOST/SMTP_PORT/SMTP_USER). Envio de e-mail pode falhar.');
 }
 
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
   port: Number(process.env.SMTP_PORT || 587),
-  secure: Number(process.env.SMTP_PORT) === 465, // 465 = SMTPS
+  secure: Number(process.env.SMTP_PORT) === 465, // SMTPS
   auth: (process.env.SMTP_USER && process.env.SMTP_PASS) ? {
     user: process.env.SMTP_USER,
     pass: process.env.SMTP_PASS,
   } : undefined,
-  logger: true, // logs SMTP no console
-  debug: true,  // logs do diálogo SMTP
+  logger: true,
+  debug: true,
   tls: {
     minVersion: 'TLSv1.2',
-    // Se o seu provedor usar certificado self-signed, habilite a linha abaixo:
-    // rejectUnauthorized: false,
+    // rejectUnauthorized: false, // só se precisar
   },
 });
 
-transporter.verify((err, success) => {
-  if (err) {
-    console.error('❌ SMTP verify falhou:', err);
-  } else {
-    console.log('✅ SMTP pronto para enviar (verify ok)');
-  }
+transporter.verify((err) => {
+  if (err) console.error('❌ SMTP verify falhou:', err);
+  else console.log('✅ SMTP pronto para enviar (verify ok)');
 });
 
-async function sendMail({ to, subject, html }) {
-  if (!SMTP_FROM) {
-    console.error('❌ SMTP_FROM não definido. Defina SMTP_FROM ou SMTP_USER.');
-    throw new Error('SMTP_FROM ausente');
-  }
-  console.log('[MAIL] Enviando para:', to, 'assunto:', subject);
-  try {
-    const info = await transporter.sendMail({
-      from: SMTP_FROM,
-      to,
-      subject,
-      html: `
-        <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto">
-          ${html}
-          <hr/>
-          <p style="color:#666;font-size:12px">Se você não solicitou, ignore este e-mail.</p>
-        </div>
-      `,
-    });
-    console.log('[MAIL] OK messageId=%s response=%s', info.messageId, info.response || '');
-    if (info.accepted?.length) console.log('[MAIL] accepted:', info.accepted);
-    if (info.rejected?.length) console.warn('[MAIL] rejected:', info.rejected);
-    return info;
-  } catch (e) {
-    console.error('❌ sendMail error:', e);
-    throw e;
-  }
+async function sendMail({ to, subject, html, attachments }) {
+  if (!SMTP_FROM) throw new Error('SMTP_FROM ausente');
+  console.log(`[MAIL] -> to=${to} subject="${subject}"`);
+  const info = await transporter.sendMail({ from: SMTP_FROM, to, subject, html, attachments });
+  console.log('[MAIL] accepted=%j rejected=%j response=%s id=%s',
+    info.accepted, info.rejected, info.response || '', info.messageId);
+  return info;
 }
 
-/* ============== Utils & rate limit ============== */
+/* ====================== Utils & rate limit ====================== */
 const now = () => new Date();
 const minutes = n => n * 60 * 1000;
 const hours   = n => n * 60 * 60 * 1000;
@@ -146,38 +201,40 @@ const resetLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false,
 });
 
-/* ============== Montagem de URL do tenant pelo BACK ============== */
+/* ====================== Helpers de URL ====================== */
+// Preferência:
+// 1) TENANT_DOMAIN_BASE -> https://{slug}.{base}
+// 2) fallback access_url do banco
 function tenantBaseUrl({ slug, fallbackAccessUrl }) {
   const base = process.env.TENANT_DOMAIN_BASE;
-  if (base) {
-    return `https://${slug}.${base}`;
-  }
+  if (base) return `https://${slug}.${base}`;
   return String(fallbackAccessUrl || '').replace(/\/+$/, '');
 }
+function buildResetLink({ slug, accessUrl, tokenValue }) {
+  const resetBase = (process.env.RESET_BASE_URL || '').replace(/\/+$/, '');
+  if (resetBase) return `https://${resetBase}/auth/set-password?token=${encodeURIComponent(tokenValue)}`;
+  return `${tenantBaseUrl({ slug, fallbackAccessUrl: accessUrl })}/auth/set-password?token=${encodeURIComponent(tokenValue)}`;
+}
 
-/* ============== CSRF ============== */
+/* ====================== CSRF ====================== */
 app.get('/api/csrf-token', (req, res) => {
   const csrfToken = crypto.randomBytes(32).toString('hex');
   res.cookie('XSRF-TOKEN', csrfToken, {
-    secure: (process.env.CSRF_COOKIE_SECURE || 'true') !== 'false', // true em cross-domain
+    secure: (process.env.CSRF_COOKIE_SECURE || 'true') !== 'false',
     httpOnly: false,
     sameSite: 'None',
-  // maxAge 24h
     maxAge: 24 * 60 * 60 * 1000,
   });
   res.json({ token: csrfToken });
 });
 
-/* ============== LOGIN ============== */
+/* ====================== LOGIN ====================== */
 app.post('/api/login', loginLimiter, async (req, res) => {
   const { email, password, rememberMe } = req.body || {};
-
-  // CSRF
   const csrfHeader = req.headers['csrf-token'];
   if (!csrfHeader || csrfHeader !== req.cookies['XSRF-TOKEN']) {
     return res.status(403).json({ message: 'Token CSRF inválido' });
   }
-
   try {
     const result = await pool.query(
       `SELECT u.id, u.email, u.password, u.profile, u.login_attempts, u.locked_until,
@@ -188,16 +245,13 @@ app.post('/api/login', loginLimiter, async (req, res) => {
       [String(email || '').toLowerCase()]
     );
     const user = result.rows[0];
-
     if (!user) {
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise(r => setTimeout(r, 400));
       return res.status(401).json({ message: 'Credenciais inválidas' });
     }
-
     if (user.locked_until && new Date(user.locked_until) > new Date()) {
       return res.status(403).json({ message: 'Conta temporariamente bloqueada' });
     }
-
     const match = await bcrypt.compare(String(password || ''), user.password || '');
     if (!match) {
       await pool.query(
@@ -210,46 +264,33 @@ app.post('/api/login', loginLimiter, async (req, res) => {
       );
       return res.status(401).json({ message: 'Credenciais inválidas' });
     }
-
     await pool.query(
       'UPDATE users SET login_attempts = 0, locked_until = NULL, last_login = NOW() WHERE email = $1',
       [email]
     );
-
     const tokenExpiration = rememberMe ? '7d' : '15m';
-    if (!process.env.JWT_SECRET) {
-      console.warn('⚠️  JWT_SECRET não definido — token será assinado mas não seguro para produção.');
-    }
     const token = jwt.sign(
       { id: user.id, email: user.email, profile: user.profile },
       process.env.JWT_SECRET || 'dev-secret',
       { expiresIn: tokenExpiration }
     );
-
     res.cookie('authToken', token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'strict',
       maxAge: rememberMe ? 7 * 24 * 60 * 60 * 1000 : undefined
     });
-
     const baseUrl = tenantBaseUrl({ slug: user.slug, fallbackAccessUrl: user.access_url });
     const redirectUrl = `${baseUrl}?token=${token}`;
-
-    res.json({
-      token,
-      redirectUrl,
-      user: { id: user.id, email: user.email, profile: user.profile }
-    });
-
+    res.json({ token, redirectUrl, user: { id: user.id, email: user.email, profile: user.profile } });
   } catch (err) {
     console.error('Erro no login:', err);
     res.status(500).json({ message: 'Erro no servidor' });
   }
 });
 
-/* ============== Logout ============== */
-app.post('/api/logout', (req, res) => {
+/* ====================== Logout ====================== */
+app.post('/api/logout', (_req, res) => {
   res.clearCookie('authToken', {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
@@ -258,14 +299,11 @@ app.post('/api/logout', (req, res) => {
   res.json({ message: 'Logout realizado com sucesso' });
 });
 
-/* ============== Forgot password ============== */
-// body: { email }
+/* ====================== Forgot password ====================== */
 app.post('/api/forgot-password', resetLimiter, async (req, res) => {
   try {
     const { email } = req.body || {};
     console.log('[forgot-password] origin=%s email=%s', req.headers.origin, email);
-
-    // Resposta neutra SEM vazar se existe ou não (sempre 200)
     if (!email) return res.status(200).json({ ok: true });
 
     const q = await pool.query(
@@ -276,8 +314,6 @@ app.post('/api/forgot-password', resetLimiter, async (req, res) => {
       [String(email).toLowerCase()]
     );
     const row = q.rows[0];
-
-    // Mesmo se não existir usuário, responde 200 (neutro)
     if (!row) return res.status(200).json({ ok: true });
 
     const raw = crypto.randomBytes(32).toString('base64url');
@@ -292,36 +328,26 @@ app.post('/api/forgot-password', resetLimiter, async (req, res) => {
     );
 
     const tokenValue = `${tokenId}.${raw}`;
-    const resetBase = (process.env.RESET_BASE_URL || '').replace(/\/+$/, '');
+    const link = buildResetLink({ slug: row.slug, accessUrl: row.access_url, tokenValue });
+    console.log('[forgot-password] reset link:', link);
 
-    const link = resetBase
-      ? `https://${resetBase}/auth/set-password?token=${encodeURIComponent(tokenValue)}`
-      : `${tenantBaseUrl({ slug: row.slug, fallbackAccessUrl: row.access_url })
-          .replace(/\/+$/,'')}/auth/set-password?token=${encodeURIComponent(tokenValue)}`;
-
-    await sendMail({
-      to: row.email,
-      subject: 'Redefinir sua senha',
-      html: `<p>Recebemos um pedido para redefinir sua senha.</p>
-             <p><a href="${link}">Clique aqui para definir a nova senha</a></p>
-             <p>O link expira em 30 minutos.</p>`
-    });
+    const tpl = renderResetEmail({ link });
+    await sendMail({ to: row.email, subject: tpl.subject, html: tpl.html, attachments: tpl.attachments });
 
     return res.status(200).json({ ok: true });
   } catch (e) {
     console.error('forgot-password error', e);
-    // Mesmo em erro, responder 200 e mensagem neutra
-    return res.status(200).json({ ok: true });
+    return res.status(200).json({ ok: true }); // resposta neutra
   }
 });
 
-/* ============== Invite (cria/garante user e envia set-password) ============== */
+/* ====================== Invite (cria/garante user + e-mail) ====================== */
 // body: { email, companySlug | companyId, profile? }
 app.post('/api/invite', async (req, res) => {
   const { email, companySlug, companyId, profile } = req.body || {};
-  if (!email || (!companySlug && !companyId))
+  if (!email || (!companySlug && !companyId)) {
     return res.status(400).json({ message: 'email e companySlug/companyId são obrigatórios' });
-
+  }
   try {
     const comp = companyId
       ? await pool.query('SELECT id, slug, access_url FROM companies WHERE id=$1', [companyId])
@@ -353,20 +379,11 @@ app.post('/api/invite', async (req, res) => {
     );
 
     const tokenValue = `${tokenId}.${raw}`;
-    const resetBase = (process.env.RESET_BASE_URL || '').replace(/\/+$/, '');
+    const link = buildResetLink({ slug: company.slug, accessUrl: company.access_url, tokenValue });
+    console.log('[invite] invite link:', link);
 
-    const link = resetBase
-      ? `https://${resetBase}/auth/set-password?token=${encodeURIComponent(tokenValue)}`
-      : `${tenantBaseUrl({ slug: company.slug, fallbackAccessUrl: company.access_url })
-          .replace(/\/+$/,'')}/auth/set-password?token=${encodeURIComponent(tokenValue)}`;
-
-    await sendMail({
-      to: user.email,
-      subject: 'Bem-vindo! Defina sua senha',
-      html: `<p>Olá! Sua conta foi criada.</p>
-             <p><a href="${link}">Definir senha</a></p>
-             <p>O link expira em 24 horas.</p>`
-    });
+    const tpl = renderInviteEmail({ link });
+    await sendMail({ to: user.email, subject: tpl.subject, html: tpl.html, attachments: tpl.attachments });
 
     res.json({ ok: true });
   } catch (e) {
@@ -375,12 +392,13 @@ app.post('/api/invite', async (req, res) => {
   }
 });
 
-/* ============== Set password ============== */
-// body: { token, newPassword }  (token = tokenId.raw)
+/* ====================== Set password ====================== */
+// body: { token, newPassword }
 app.post('/api/set-password', async (req, res) => {
   const { token, newPassword } = req.body || {};
-  if (!token || !newPassword || String(newPassword).length < 8)
+  if (!token || !newPassword || String(newPassword).length < 8) {
     return res.status(400).json({ message: 'token e senha (mín. 8) são obrigatórios' });
+  }
 
   const [tokenId, raw] = String(token).split('.');
   if (!tokenId || !raw) return res.status(400).json({ message: 'Token inválido' });
@@ -394,8 +412,9 @@ app.post('/api/set-password', async (req, res) => {
       [tokenId]
     );
     const rec = q.rows[0];
-    if (!rec || rec.used_at || new Date(rec.expires_at) <= now())
+    if (!rec || rec.used_at || new Date(rec.expires_at) <= now()) {
       return res.status(400).json({ message: 'Token inválido ou expirado' });
+    }
 
     const ok = await bcrypt.compare(raw, rec.token_hash);
     if (!ok) return res.status(400).json({ message: 'Token inválido' });
@@ -423,41 +442,71 @@ app.post('/api/set-password', async (req, res) => {
   }
 });
 
-/* ============== Health & errors ============== */
-app.get('/api/health', (req, res) => {
+/* ====================== Health ====================== */
+app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', env: process.env.NODE_ENV });
 });
 
-/* ============== Rota de teste de e-mail ============== */
+/* ====================== Teste de e-mail ====================== */
 // GET /api/test-mail?to=email@dominio
 app.get('/api/test-mail', async (req, res) => {
   try {
     const to = String(req.query.to || '').trim();
     if (!to) return res.status(400).json({ message: 'Informe ?to=email@dominio' });
 
-    const resetBase = (process.env.RESET_BASE_URL || '').replace(/\/+$/, '');
-    const linkExemplo = resetBase
-      ? `https://${resetBase}/auth/set-password?token=teste.token`
-      : `https://example.com/auth/set-password?token=teste.token`;
+    const tokenValue = 'teste.token';
+    const link = buildResetLink({ slug: 'hmg', accessUrl: '', tokenValue });
 
-    const info = await sendMail({
-      to,
-      subject: 'Teste de envio (Portal)',
-      html: `<p>Teste de envio funcionando ✅</p>
-             <p>Link exemplo: <a href="${linkExemplo}">${linkExemplo}</a></p>`
-    });
+    const { subject, html, attachments } = renderInviteEmail({ link }); // usa o de boas-vindas só pra validar layout
+    const info = await sendMail({ to, subject: `[TESTE] ${subject}`, html, attachments });
 
     res.json({ ok: true, messageId: info.messageId, response: info.response || null });
   } catch (e) {
+    console.error('test-mail error', e);
     res.status(500).json({ ok: false, error: e.message });
   }
 });
 
-app.use((err, req, res, next) => {
+/* ====================== Exclusão também em public.users ====================== */
+/**
+ * DELETE /api/users
+ * body: { email, companySlug | companyId }
+ * Remove o usuário da tabela "users" (public) pelo par (company_id, email).
+ * Útil quando a exclusão foi feita em outro serviço e você quer refletir aqui.
+ */
+app.delete('/api/users', async (req, res) => {
+  try {
+    const { email, companySlug, companyId } = req.body || {};
+    if (!email || (!companySlug && !companyId)) {
+      return res.status(400).json({ message: 'email e companySlug/companyId são obrigatórios' });
+    }
+    const lower = String(email).toLowerCase();
+    const comp = companyId
+      ? await pool.query('SELECT id FROM companies WHERE id=$1', [companyId])
+      : await pool.query('SELECT id FROM companies WHERE slug=$1', [companySlug]);
+    const company = comp.rows[0];
+    if (!company) return res.status(404).json({ message: 'Empresa não encontrada' });
+
+    const del = await pool.query(
+      'DELETE FROM users WHERE company_id=$1 AND email=$2',
+      [company.id, lower]
+    );
+    console.log('[delete-user] company_id=%s email=%s rowCount=%s',
+      company.id, lower, del.rowCount);
+
+    res.json({ ok: true, deleted: del.rowCount });
+  } catch (e) {
+    console.error('delete-user error', e);
+    res.status(500).json({ message: 'Erro ao excluir' });
+  }
+});
+
+/* ====================== Error handler ====================== */
+app.use((err, _req, res, _next) => {
   console.error(err.stack);
   res.status(500).json({ message: 'Internal server error' });
 });
 
-/* ============== Start ============== */
+/* ====================== Start ====================== */
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
