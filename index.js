@@ -1,3 +1,4 @@
+// index.js
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -65,29 +66,72 @@ app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 
 /* ============== Banco ============== */
+if (!process.env.DATABASE_URL) {
+  console.warn('⚠️  DATABASE_URL não definido. O servidor subirá, mas rotas que usam DB falharão.');
+}
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: false, // ajuste p/ seu provedor
 });
 
-/* ============== E-mail ============== */
+/* ============== E-mail (Nodemailer com debug + verify) ============== */
+const SMTP_FROM = process.env.SMTP_FROM || (process.env.SMTP_USER ? `"Portal" <${process.env.SMTP_USER}>` : undefined);
+if (!process.env.SMTP_HOST || !process.env.SMTP_PORT || !process.env.SMTP_USER) {
+  console.warn('⚠️  Variáveis SMTP ausentes (SMTP_HOST/SMTP_PORT/SMTP_USER). Envio de e-mail vai falhar.');
+}
+
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
   port: Number(process.env.SMTP_PORT || 587),
-  secure: Number(process.env.SMTP_PORT) === 465,
-  auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+  secure: Number(process.env.SMTP_PORT) === 465, // 465 = SMTPS
+  auth: (process.env.SMTP_USER && process.env.SMTP_PASS) ? {
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS,
+  } : undefined,
+  logger: true, // logs SMTP no console
+  debug: true,  // logs do diálogo SMTP
+  tls: {
+    minVersion: 'TLSv1.2',
+    // Se o seu provedor usar certificado self-signed, habilite a linha abaixo:
+    // rejectUnauthorized: false,
+  },
 });
+
+transporter.verify((err, success) => {
+  if (err) {
+    console.error('❌ SMTP verify falhou:', err);
+  } else {
+    console.log('✅ SMTP pronto para enviar (verify ok)');
+  }
+});
+
 async function sendMail({ to, subject, html }) {
-  return transporter.sendMail({
-    from: `"Portal" <${process.env.SMTP_USER}>`,
-    to, subject,
-    html: `
-      <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto">
-        ${html}
-        <hr/>
-        <p style="color:#666;font-size:12px">Se você não solicitou, ignore este e-mail.</p>
-      </div>`
-  });
+  if (!SMTP_FROM) {
+    console.error('❌ SMTP_FROM não definido. Defina SMTP_FROM ou SMTP_USER.');
+    throw new Error('SMTP_FROM ausente');
+  }
+  console.log('[MAIL] Enviando para:', to, 'assunto:', subject);
+  try {
+    const info = await transporter.sendMail({
+      from: SMTP_FROM,
+      to,
+      subject,
+      html: `
+        <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto">
+          ${html}
+          <hr/>
+          <p style="color:#666;font-size:12px">Se você não solicitou, ignore este e-mail.</p>
+        </div>
+      `,
+    });
+    console.log('[MAIL] OK messageId=%s response=%s', info.messageId, info.response || '');
+    if (info.accepted?.length) console.log('[MAIL] accepted:', info.accepted);
+    if (info.rejected?.length) console.warn('[MAIL] rejected:', info.rejected);
+    return info;
+  } catch (e) {
+    console.error('❌ sendMail error:', e);
+    throw e;
+  }
 }
 
 /* ============== Utils & rate limit ============== */
@@ -102,18 +146,12 @@ const resetLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false,
 });
 
-/* ============== Montagem de URL do tenant pelo BACK ==============
-   Preferência:
-   1) TENANT_ACCESS_URL_TEMPLATE (ex.: https://{slug}.dkdevs.com.br)
-   2) TENANT_PROTOCOL + TENANT_DOMAIN_BASE -> https://{slug}.{base}
-   3) fallback para access_url do banco (quando existir)
-*/
+/* ============== Montagem de URL do tenant pelo BACK ============== */
 function tenantBaseUrl({ slug, fallbackAccessUrl }) {
   const base = process.env.TENANT_DOMAIN_BASE;
   if (base) {
     return `https://${slug}.${base}`;
   }
-  // último recurso: usar o que vier do banco
   return String(fallbackAccessUrl || '').replace(/\/+$/, '');
 }
 
@@ -124,16 +162,17 @@ app.get('/api/csrf-token', (req, res) => {
     secure: (process.env.CSRF_COOKIE_SECURE || 'true') !== 'false', // true em cross-domain
     httpOnly: false,
     sameSite: 'None',
-    maxAge: 86400000
+  // maxAge 24h
+    maxAge: 24 * 60 * 60 * 1000,
   });
   res.json({ token: csrfToken });
 });
 
-/* ============== LOGIN (igual ao antigo quanto ao redirect) ============== */
+/* ============== LOGIN ============== */
 app.post('/api/login', loginLimiter, async (req, res) => {
-  const { email, password, rememberMe } = req.body;
+  const { email, password, rememberMe } = req.body || {};
 
-  // CSRF como no antigo
+  // CSRF
   const csrfHeader = req.headers['csrf-token'];
   if (!csrfHeader || csrfHeader !== req.cookies['XSRF-TOKEN']) {
     return res.status(403).json({ message: 'Token CSRF inválido' });
@@ -142,7 +181,7 @@ app.post('/api/login', loginLimiter, async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT u.id, u.email, u.password, u.profile, u.login_attempts, u.locked_until,
-              c.slug, c.access_url  -- usamos slug e só usamos access_url como fallback
+              c.slug, c.access_url
          FROM users u
          JOIN companies c ON u.company_id = c.id
         WHERE u.email = $1`,
@@ -178,9 +217,12 @@ app.post('/api/login', loginLimiter, async (req, res) => {
     );
 
     const tokenExpiration = rememberMe ? '7d' : '15m';
+    if (!process.env.JWT_SECRET) {
+      console.warn('⚠️  JWT_SECRET não definido — token será assinado mas não seguro para produção.');
+    }
     const token = jwt.sign(
       { id: user.id, email: user.email, profile: user.profile },
-      process.env.JWT_SECRET,
+      process.env.JWT_SECRET || 'dev-secret',
       { expiresIn: tokenExpiration }
     );
 
@@ -191,7 +233,6 @@ app.post('/api/login', loginLimiter, async (req, res) => {
       maxAge: rememberMe ? 7 * 24 * 60 * 60 * 1000 : undefined
     });
 
-    // >>> monta a base via env + slug (ou access_url como fallback)
     const baseUrl = tenantBaseUrl({ slug: user.slug, fallbackAccessUrl: user.access_url });
     const redirectUrl = `${baseUrl}?token=${token}`;
 
@@ -250,14 +291,13 @@ app.post('/api/forgot-password', resetLimiter, async (req, res) => {
       [tokenId, row.user_id, row.company_id, 'reset', hash, expiresAt]
     );
 
-const tokenValue = `${tokenId}.${raw}`;
-const resetBase = (process.env.RESET_BASE_URL || '').replace(/\/+$/, '');
+    const tokenValue = `${tokenId}.${raw}`;
+    const resetBase = (process.env.RESET_BASE_URL || '').replace(/\/+$/, '');
 
-const link = resetBase
-  ? `https://${resetBase}/auth/set-password?token=${encodeURIComponent(tokenValue)}`
-  : `${tenantBaseUrl({ slug: row.slug, fallbackAccessUrl: row.access_url })
-       .replace(/\/+$/,'')}/auth/set-password?token=${encodeURIComponent(tokenValue)}`;
-
+    const link = resetBase
+      ? `https://${resetBase}/auth/set-password?token=${encodeURIComponent(tokenValue)}`
+      : `${tenantBaseUrl({ slug: row.slug, fallbackAccessUrl: row.access_url })
+          .replace(/\/+$/,'')}/auth/set-password?token=${encodeURIComponent(tokenValue)}`;
 
     await sendMail({
       to: row.email,
@@ -274,7 +314,6 @@ const link = resetBase
     return res.status(200).json({ ok: true });
   }
 });
-
 
 /* ============== Invite (cria/garante user e envia set-password) ============== */
 // body: { email, companySlug | companyId, profile? }
@@ -313,14 +352,13 @@ app.post('/api/invite', async (req, res) => {
       [tokenId, user.id, company.id, 'invite', hash, expiresAt]
     );
 
-const tokenValue = `${tokenId}.${raw}`;
-const resetBase = (process.env.RESET_BASE_URL || '').replace(/\/+$/, '');
+    const tokenValue = `${tokenId}.${raw}`;
+    const resetBase = (process.env.RESET_BASE_URL || '').replace(/\/+$/, '');
 
-const link = resetBase
-  ? `https://${resetBase}/auth/set-password?token=${encodeURIComponent(tokenValue)}`
-  : `${tenantBaseUrl({ slug: company.slug, fallbackAccessUrl: company.access_url })
-       .replace(/\/+$/,'')}/auth/set-password?token=${encodeURIComponent(tokenValue)}`;
-
+    const link = resetBase
+      ? `https://${resetBase}/auth/set-password?token=${encodeURIComponent(tokenValue)}`
+      : `${tenantBaseUrl({ slug: company.slug, fallbackAccessUrl: company.access_url })
+          .replace(/\/+$/,'')}/auth/set-password?token=${encodeURIComponent(tokenValue)}`;
 
     await sendMail({
       to: user.email,
@@ -390,6 +428,31 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', env: process.env.NODE_ENV });
 });
 
+/* ============== Rota de teste de e-mail ============== */
+// GET /api/test-mail?to=email@dominio
+app.get('/api/test-mail', async (req, res) => {
+  try {
+    const to = String(req.query.to || '').trim();
+    if (!to) return res.status(400).json({ message: 'Informe ?to=email@dominio' });
+
+    const resetBase = (process.env.RESET_BASE_URL || '').replace(/\/+$/, '');
+    const linkExemplo = resetBase
+      ? `https://${resetBase}/auth/set-password?token=teste.token`
+      : `https://example.com/auth/set-password?token=teste.token`;
+
+    const info = await sendMail({
+      to,
+      subject: 'Teste de envio (Portal)',
+      html: `<p>Teste de envio funcionando ✅</p>
+             <p>Link exemplo: <a href="${linkExemplo}">${linkExemplo}</a></p>`
+    });
+
+    res.json({ ok: true, messageId: info.messageId, response: info.response || null });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(500).json({ message: 'Internal server error' });
@@ -398,6 +461,3 @@ app.use((err, req, res, next) => {
 /* ============== Start ============== */
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-
-
-
