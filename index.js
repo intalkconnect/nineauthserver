@@ -262,6 +262,7 @@ app.post('/api/login', loginLimiter, async (req, res) => {
   if (!csrfHeader || csrfHeader !== req.cookies['XSRF-TOKEN']) {
     return res.status(403).json({ message: 'Token CSRF inválido' });
   }
+
   try {
     const result = await pool.query(
       `SELECT u.id, u.email, u.password, u.profile, u.login_attempts, u.locked_until,
@@ -279,6 +280,7 @@ app.post('/api/login', loginLimiter, async (req, res) => {
     if (user.locked_until && new Date(user.locked_until) > new Date()) {
       return res.status(403).json({ message: 'Conta temporariamente bloqueada' });
     }
+
     const match = await bcrypt.compare(String(password || ''), user.password || '');
     if (!match) {
       await pool.query(
@@ -291,32 +293,63 @@ app.post('/api/login', loginLimiter, async (req, res) => {
       );
       return res.status(401).json({ message: 'Credenciais inválidas' });
     }
+
     await pool.query(
       'UPDATE users SET login_attempts = 0, locked_until = NULL, last_login = NOW() WHERE email = $1',
       [email]
     );
-    const tokenExpiration = rememberMe ? '7d' : '15m';
-    const token = jwt.sign(
-      { id: user.id, email: user.email, profile: user.profile },
-      process.env.JWT_SECRET || 'dev-secret',
-      { expiresIn: tokenExpiration }
+
+    // ===> A PARTIR DAQUI: gera token DE TENANT (não JWT) <===
+
+    // 1) Obter tenant_id pelo slug do usuário (o guard usa public.tenants.subdomain)
+    const t = await pool.query(
+      'SELECT id FROM public.tenants WHERE subdomain = $1 LIMIT 1',
+      [user.slug]
     );
-res.cookie('authToken', token, {
-  httpOnly: true,
- sameSite: 'None',                // necessário: auth → tenant é cross-site
- secure: true,                    // obrigatório com SameSite=None
- domain: '.ninechat.com.br',      // cookie vale para *.ninechat.com.br
- path: '/api',                    // só acompanha chamadas à API
-  maxAge: rememberMe ? 7 * 24 * 60 * 60 * 1000 : undefined
-});
+    const tenantId = t.rows[0]?.id;
+    if (!tenantId) {
+      return res.status(404).json({ message: 'Tenant não encontrado para slug ' + user.slug });
+    }
+
+    // 2) Gerar id + secret plaintext e salvar secret_hash no banco
+    const tokenId = uuidv4();                               // <uuid>
+    const secret  = crypto.randomBytes(32).toString('hex'); // <hexsecret> (64 hex)
+    const secretHash = await bcrypt.hash(secret, 10);
+
+    await pool.query(
+      `INSERT INTO public.tenant_tokens (id, tenant_id, secret_hash, status, is_default)
+       VALUES ($1, $2, $3, 'active', false)`,
+      [tokenId, tenantId, secretHash]
+    );
+
+    const bearerPlaintext = `${tokenId}.${secret}`; // o guard espera EXATAMENTE isso
+
+    // 3) Setar cookie httpOnly com o plaintext (<uuid>.<hexsecret>)
+    res.cookie('authToken', bearerPlaintext, {
+      httpOnly: true,
+      secure: true,                 // obrigatório com SameSite=None
+      sameSite: 'None',             // cross-site: auth. -> {tenant}.
+      domain: '.ninechat.com.br',   // vale para *.ninechat.com.br
+      path: '/api',                 // só acompanha chamadas à API
+      maxAge: rememberMe ? 7*24*60*60*1000 : 15*60*1000
+    });
+
+    // 4) Redireciono o front para o host do tenant (sem expor token)
     const baseUrl = tenantBaseUrl({ slug: user.slug, fallbackAccessUrl: user.access_url });
-    const redirectUrl = `${baseUrl}?token=${token}`;
-    res.json({ token, redirectUrl, user: { id: user.id, email: user.email, profile: user.profile } });
+    // Se quiser manter o payload do response:
+    res.json({
+      ok: true,
+      redirectUrl: baseUrl,
+      user: { id: user.id, email: user.email, profile: user.profile }
+      // IMPORTANTE: não retorne o token no JSON
+    });
+
   } catch (err) {
     console.error('Erro no login:', err);
     res.status(500).json({ message: 'Erro no servidor' });
   }
 });
+
 
 /* ====================== Logout ====================== */
 app.post('/api/logout', (_req, res) => {
@@ -540,4 +573,5 @@ app.use((err, _req, res, _next) => {
 /* ====================== Start ====================== */
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
 
