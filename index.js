@@ -256,93 +256,40 @@ app.get('/api/csrf-token', (req, res) => {
 });
 
 /* ====================== LOGIN ====================== */
-app.post('/api/login', loginLimiter, async (req, res) => {
-  const { email, password, rememberMe } = req.body || {};
-  const csrfHeader = req.headers['csrf-token'];
-  if (!csrfHeader || csrfHeader !== req.cookies['XSRF-TOKEN']) {
-    return res.status(403).json({ message: 'Token CSRF inválido' });
-  }
+// no /api/login (depois de validar a senha)
+const { rows: defRows } = await pool.query(
+  `SELECT t.id
+     FROM public.tenants tn
+     JOIN public.tenant_tokens t ON t.tenant_id = tn.id
+    WHERE tn.subdomain = $1 AND t.is_default = true AND t.status = 'active'
+    LIMIT 1`,
+  [user.slug] // ex.: "hmg"
+);
+const defaultTokenId = defRows[0]?.id;
+if (!defaultTokenId) {
+  return res.status(403).json({ message: 'Tenant sem token default ativo' });
+}
 
-  try {
-    const result = await pool.query(
-      `SELECT u.id, u.email, u.password, u.profile, u.login_attempts, u.locked_until,
-              c.slug, c.access_url
-         FROM users u
-         JOIN companies c ON u.company_id = c.id
-        WHERE u.email = $1`,
-      [String(email || '').toLowerCase()]
-    );
-    const user = result.rows[0];
-    if (!user) {
-      await new Promise(r => setTimeout(r, 400));
-      return res.status(401).json({ message: 'Credenciais inválidas' });
-    }
-    if (user.locked_until && new Date(user.locked_until) > new Date()) {
-      return res.status(403).json({ message: 'Conta temporariamente bloqueada' });
-    }
+// “comprovante” curto: NÃO contém secret, só o ID do token default + tenant
+const assertJwt = jwt.sign(
+  { typ: 'default-assert', tenant: user.slug, tokenId: defaultTokenId },
+  process.env.JWT_SECRET,                        // HS256 já usado no projeto
+  { expiresIn: rememberMe ? '7d' : '15m' }       // curto!
+);
 
-    const match = await bcrypt.compare(String(password || ''), user.password || '');
-    if (!match) {
-      await pool.query(
-        `UPDATE users
-            SET login_attempts = login_attempts + 1,
-                locked_until = CASE WHEN login_attempts + 1 >= 5
-                                    THEN NOW() + INTERVAL '30 minutes' ELSE NULL END
-          WHERE email = $1`,
-        [email]
-      );
-      return res.status(401).json({ message: 'Credenciais inválidas' });
-    }
+// cookie httpOnly cross-subdomínio (não expõe o token real)
+res.cookie('defaultAssert', assertJwt, {
+  httpOnly: true,
+  secure: true,
+  sameSite: 'None',
+  domain: '.ninechat.com.br',
+  path: '/api',         // só acompanha chamadas à API
+  maxAge: rememberMe ? 7*24*60*60*1000 : 15*60*1000
+});
 
-    await pool.query(
-      'UPDATE users SET login_attempts = 0, locked_until = NULL, last_login = NOW() WHERE email = $1',
-      [email]
-    );
-
-    // ===> A PARTIR DAQUI: gera token DE TENANT (não JWT) <===
-
-    // 1) Obter tenant_id pelo slug do usuário (o guard usa public.tenants.subdomain)
-    const t = await pool.query(
-      'SELECT id FROM public.tenants WHERE subdomain = $1 LIMIT 1',
-      [user.slug]
-    );
-    const tenantId = t.rows[0]?.id;
-    if (!tenantId) {
-      return res.status(404).json({ message: 'Tenant não encontrado para slug ' + user.slug });
-    }
-
-    // 2) Gerar id + secret plaintext e salvar secret_hash no banco
-    const tokenId = uuidv4();                               // <uuid>
-    const secret  = crypto.randomBytes(32).toString('hex'); // <hexsecret> (64 hex)
-    const secretHash = await bcrypt.hash(secret, 10);
-
-    await pool.query(
-      `INSERT INTO public.tenant_tokens (id, tenant_id, secret_hash, status, is_default)
-       VALUES ($1, $2, $3, 'active', false)`,
-      [tokenId, tenantId, secretHash]
-    );
-
-    const bearerPlaintext = `${tokenId}.${secret}`; // o guard espera EXATAMENTE isso
-
-    // 3) Setar cookie httpOnly com o plaintext (<uuid>.<hexsecret>)
-    res.cookie('authToken', bearerPlaintext, {
-      httpOnly: true,
-      secure: true,                 // obrigatório com SameSite=None
-      sameSite: 'None',             // cross-site: auth. -> {tenant}.
-      domain: '.ninechat.com.br',   // vale para *.ninechat.com.br
-      path: '/api',                 // só acompanha chamadas à API
-      maxAge: rememberMe ? 7*24*60*60*1000 : 15*60*1000
-    });
-
-    // 4) Redireciono o front para o host do tenant (sem expor token)
-    const baseUrl = tenantBaseUrl({ slug: user.slug, fallbackAccessUrl: user.access_url });
-    // Se quiser manter o payload do response:
-    res.json({
-      ok: true,
-      redirectUrl: baseUrl,
-      user: { id: user.id, email: user.email, profile: user.profile }
-      // IMPORTANTE: não retorne o token no JSON
-    });
+// resposta igual (sem devolver nada sensível)
+const baseUrl = tenantBaseUrl({ slug: user.slug, fallbackAccessUrl: user.access_url });
+return res.json({ ok: true, redirectUrl: baseUrl, user: { id: user.id, email: user.email, profile: user.profile } });
 
   } catch (err) {
     console.error('Erro no login:', err);
@@ -573,5 +520,6 @@ app.use((err, _req, res, _next) => {
 /* ====================== Start ====================== */
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
 
 
