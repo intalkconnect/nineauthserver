@@ -257,45 +257,77 @@ app.get('/api/csrf-token', (req, res) => {
 
 /* ====================== LOGIN ====================== */
 // no /api/login (depois de validar a senha)
-const { rows: defRows } = await pool.query(
-  `SELECT t.id
-     FROM public.tenants tn
-     JOIN public.tenant_tokens t ON t.tenant_id = tn.id
-    WHERE tn.subdomain = $1 AND t.is_default = true AND t.status = 'active'
-    LIMIT 1`,
-  [user.slug] // ex.: "hmg"
-);
-const defaultTokenId = defRows[0]?.id;
-if (!defaultTokenId) {
-  return res.status(403).json({ message: 'Tenant sem token default ativo' });
-}
+app.post('/api/login', loginLimiter, async (req, res) => {
+  const { email, password, rememberMe } = req.body || {};
+  const csrfHeader = req.headers['csrf-token'];
+  if (!csrfHeader || csrfHeader !== req.cookies['XSRF-TOKEN']) {
+    return res.status(403).json({ message: 'Token CSRF inválido' });
+  }
 
-// “comprovante” curto: NÃO contém secret, só o ID do token default + tenant
-const assertJwt = jwt.sign(
-  { typ: 'default-assert', tenant: user.slug, tokenId: defaultTokenId },
-  process.env.JWT_SECRET,                        // HS256 já usado no projeto
-  { expiresIn: rememberMe ? '7d' : '15m' }       // curto!
-);
+  try {
+    const result = await pool.query(
+      `SELECT u.id, u.email, u.password, u.profile, u.login_attempts, u.locked_until,
+              c.slug, c.access_url
+         FROM users u
+         JOIN companies c ON u.company_id = c.id
+        WHERE u.email = $1`,
+      [String(email || '').toLowerCase()]
+    );
 
-// cookie httpOnly cross-subdomínio (não expõe o token real)
-res.cookie('defaultAssert', assertJwt, {
-  httpOnly: true,
-  secure: true,
-  sameSite: 'None',
-  domain: '.ninechat.com.br',
-  path: '/api',         // só acompanha chamadas à API
-  maxAge: rememberMe ? 7*24*60*60*1000 : 15*60*1000
-});
+    const user = result.rows[0];
+    if (!user) {
+      await new Promise(r => setTimeout(r, 400));
+      return res.status(401).json({ message: 'Credenciais inválidas' });
+    }
 
-// resposta igual (sem devolver nada sensível)
-const baseUrl = tenantBaseUrl({ slug: user.slug, fallbackAccessUrl: user.access_url });
-return res.json({ ok: true, redirectUrl: baseUrl, user: { id: user.id, email: user.email, profile: user.profile } });
+    const match = await bcrypt.compare(String(password || ''), user.password || '');
+    if (!match) {
+      return res.status(401).json({ message: 'Credenciais inválidas' });
+    }
 
+    // 🔑 AQUI buscamos o token default do tenant
+    const { rows: defRows } = await pool.query(
+      `SELECT t.id
+         FROM public.tenants tn
+         JOIN public.tenant_tokens t ON t.tenant_id = tn.id
+        WHERE tn.slug = $1 AND t.is_default = true AND t.status = 'active'
+        LIMIT 1`,
+      [user.slug]
+    );
+    const defaultTokenId = defRows[0]?.id;
+    if (!defaultTokenId) {
+      return res.status(403).json({ message: 'Tenant sem token default ativo' });
+    }
+
+    // Cria o JWT curto (comprovante)
+    const assertJwt = jwt.sign(
+      { typ: 'default-assert', tenant: user.slug, tokenId: defaultTokenId },
+      process.env.JWT_SECRET,
+      { expiresIn: rememberMe ? '7d' : '15m' }
+    );
+
+    // Setar cookie httpOnly, sem expor token
+    res.cookie('defaultAssert', assertJwt, {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'None',
+      domain: '.ninechat.com.br',
+      path: '/api',
+      maxAge: rememberMe ? 7 * 24 * 60 * 60 * 1000 : 15 * 60 * 1000
+    });
+
+    const baseUrl = tenantBaseUrl({ slug: user.slug, fallbackAccessUrl: user.access_url });
+    return res.json({
+      ok: true,
+      redirectUrl: baseUrl,
+      user: { id: user.id, email: user.email, profile: user.profile }
+    });
   } catch (err) {
     console.error('Erro no login:', err);
     res.status(500).json({ message: 'Erro no servidor' });
   }
 });
+
 
 
 /* ====================== Logout ====================== */
@@ -520,6 +552,7 @@ app.use((err, _req, res, _next) => {
 /* ====================== Start ====================== */
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
 
 
 
