@@ -301,12 +301,14 @@ app.post('/api/login', loginLimiter, async (req, res) => {
       process.env.JWT_SECRET || 'dev-secret',
       { expiresIn: tokenExpiration }
     );
-    res.cookie('authToken', token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
-      maxAge: rememberMe ? 7 * 24 * 60 * 60 * 1000 : undefined
-    });
+res.cookie('authToken', token, {
+  httpOnly: true,
+ sameSite: 'None',                // necessário: auth → tenant é cross-site
+ secure: true,                    // obrigatório com SameSite=None
+ domain: '.ninechat.com.br',      // cookie vale para *.ninechat.com.br
+ path: '/api',                    // só acompanha chamadas à API
+  maxAge: rememberMe ? 7 * 24 * 60 * 60 * 1000 : undefined
+});
     const baseUrl = tenantBaseUrl({ slug: user.slug, fallbackAccessUrl: user.access_url });
     const redirectUrl = `${baseUrl}?token=${token}`;
     res.json({ token, redirectUrl, user: { id: user.id, email: user.email, profile: user.profile } });
@@ -538,3 +540,4 @@ app.use((err, _req, res, _next) => {
 /* ====================== Start ====================== */
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
