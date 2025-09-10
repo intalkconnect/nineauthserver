@@ -334,12 +334,64 @@ app.post('/api/login', loginLimiter, async (req, res) => {
     // (opcional) ajuda a depurar no Network
     res.setHeader('X-Redirect-To', redirectUrl);
 
-    // Resposta que o front espera
-    return res.json({
-      token,
-      redirectUrl,
-      user: { id: user.id, email: user.email, profile: user.profile }
-    });
+    // ... dentro do seu app.post('/api/login', ...) após validar senha e montar `token` e `redirectUrl`:
+
+// ===== NOVO: emitir "comprovante" para o token default do tenant =====
+let defaultTokenId = null;
+
+// tente encontrar pelo tenants.subdomain (se sua base tiver essa tabela)
+try {
+  const q1 = await pool.query(
+    `SELECT t.id
+       FROM public.tenants tn
+       JOIN public.tenant_tokens t ON t.tenant_id = tn.id
+      WHERE tn.subdomain = $1
+        AND t.is_default = true
+        AND t.status = 'active'
+      LIMIT 1`,
+    [user.slug]
+  );
+  defaultTokenId = q1.rows[0]?.id || null;
+} catch { /* ignora */ }
+
+// fallback: companies.slug (se seu tenant for "companies")
+if (!defaultTokenId) {
+  const q2 = await pool.query(
+    `SELECT t.id
+       FROM public.companies c
+       JOIN public.tenant_tokens t ON t.tenant_id = c.id
+      WHERE c.slug = $1
+        AND t.is_default = true
+        AND t.status = 'active'
+      LIMIT 1`,
+    [user.slug]
+  );
+  defaultTokenId = q2.rows[0]?.id || null;
+}
+
+// se achou default, gera um JWT curto só com o ID (NÃO expõe secret)
+if (defaultTokenId) {
+  const defaultAssert = jwt.sign(
+    { typ: 'default-assert', tenant: user.slug, tokenId: defaultTokenId },
+    process.env.JWT_SECRET || 'dev-secret',
+    { expiresIn: rememberMe ? '7d' : '15m' }
+  );
+
+  // cookie cross-subdomínio para ser enviado ao {slug}.ninechat.com.br/api/*
+  res.cookie('defaultAssert', defaultAssert, {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'None',
+    domain: '.ninechat.com.br',
+    path: '/api',
+    maxAge: rememberMe ? 7 * 24 * 60 * 60 * 1000 : 15 * 60 * 1000
+  });
+}
+// ===== FIM DO NOVO =====
+
+// seu retorno ANTIGO permanece igual:
+return res.json({ token, redirectUrl, user: { id: user.id, email: user.email, profile: user.profile } });
+
   } catch (err) {
     console.error('Erro no login:', err);
     return res.status(500).json({ message: 'Erro no servidor' });
@@ -568,6 +620,7 @@ app.use((err, _req, res, _next) => {
 /* ====================== Start ====================== */
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
 
 
 
