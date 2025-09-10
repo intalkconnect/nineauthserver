@@ -273,42 +273,79 @@ app.post('/api/login', loginLimiter, async (req, res) => {
         WHERE u.email = $1`,
       [String(email || '').toLowerCase()]
     );
-
     const user = result.rows[0];
+
     if (!user) {
       await new Promise(r => setTimeout(r, 400));
       return res.status(401).json({ message: 'Credenciais inválidas' });
     }
+    if (user.locked_until && new Date(user.locked_until) > new Date()) {
+      return res.status(403).json({ message: 'Conta temporariamente bloqueada' });
+    }
 
     const match = await bcrypt.compare(String(password || ''), user.password || '');
     if (!match) {
+      await pool.query(
+        `UPDATE users
+            SET login_attempts = login_attempts + 1,
+                locked_until = CASE WHEN login_attempts + 1 >= 5
+                                    THEN NOW() + INTERVAL '30 minutes' ELSE NULL END
+          WHERE email = $1`,
+        [email]
+      );
       return res.status(401).json({ message: 'Credenciais inválidas' });
     }
 
-    // 🔑 AQUI buscamos o token default do tenant
- const { rows: defRows } = await pool.query(
-   `SELECT t.id
-      FROM public.tenants tn
-      JOIN public.tenant_tokens t ON t.tenant_id = tn.id
-     WHERE tn.subdomain = $1
-       AND t.is_default = true
-       AND t.status = 'active'
-     LIMIT 1`,
-   [user.slug] // aqui o "slug" que você já tem do SELECT em companies deve coincidir com tenants.subdomain
- );
-    const defaultTokenId = defRows[0]?.id;
+    await pool.query(
+      'UPDATE users SET login_attempts = 0, locked_until = NULL, last_login = NOW() WHERE email = $1',
+      [email]
+    );
+
+    // ====== NOVO: gerar "default-assert" curto (sem expor segredo) ======
+    // busca o ID do token default ativo (usa tenants.subdomain OU companies.slug, escolha 1)
+    let defaultTokenId = null;
+
+    // tenta por tenants.subdomain (se existir)
+    try {
+      const q1 = await pool.query(
+        `SELECT t.id
+           FROM public.tenants tn
+           JOIN public.tenant_tokens t ON t.tenant_id = tn.id
+          WHERE tn.subdomain = $1
+            AND t.is_default = true
+            AND t.status = 'active'
+          LIMIT 1`,
+        [user.slug]
+      );
+      defaultTokenId = q1.rows[0]?.id || null;
+    } catch {}
+
+    // fallback por companies.slug (se for o seu caso)
+    if (!defaultTokenId) {
+      const q2 = await pool.query(
+        `SELECT t.id
+           FROM public.companies c
+           JOIN public.tenant_tokens t ON t.tenant_id = c.id
+          WHERE c.slug = $1
+            AND t.is_default = true
+            AND t.status = 'active'
+          LIMIT 1`,
+        [user.slug]
+      );
+      defaultTokenId = q2.rows[0]?.id || null;
+    }
+
     if (!defaultTokenId) {
       return res.status(403).json({ message: 'Tenant sem token default ativo' });
     }
 
-    // Cria o JWT curto (comprovante)
     const assertJwt = jwt.sign(
       { typ: 'default-assert', tenant: user.slug, tokenId: defaultTokenId },
-      process.env.JWT_SECRET,
+      process.env.JWT_SECRET || 'dev-secret',
       { expiresIn: rememberMe ? '7d' : '15m' }
     );
 
-    // Setar cookie httpOnly, sem expor token
+    // cookie httpOnly (não expõe o token), para a API ler e transformar em Authorization: Default <jwt>
     res.cookie('defaultAssert', assertJwt, {
       httpOnly: true,
       secure: true,
@@ -318,17 +355,31 @@ app.post('/api/login', loginLimiter, async (req, res) => {
       maxAge: rememberMe ? 7 * 24 * 60 * 60 * 1000 : 15 * 60 * 1000
     });
 
+    // ====== REDIRECT EXATAMENTE COMO NO ANTIGO ======
     const baseUrl = tenantBaseUrl({ slug: user.slug, fallbackAccessUrl: user.access_url });
+    const redirectUrl = `${baseUrl}?token=${encodeURIComponent(assertJwt)}`; // mantém ?token
+
+    // (opcional) header de debug para ver no network
+    res.setHeader('X-Redirect-To', redirectUrl);
+
+    // ⚠️ escolha UM dos dois blocos abaixo:
+
+    // A) Comportamento antigo (JSON) — seu front redireciona via JS:
     return res.json({
-      ok: true,
-      redirectUrl: baseUrl,
+      token: assertJwt, // mantém para compatibilidade
+      redirectUrl,
       user: { id: user.id, email: user.email, profile: user.profile }
     });
+
+    // B) Redirecionar no servidor (se preferir 302):
+    // return res.redirect(302, redirectUrl);
+
   } catch (err) {
     console.error('Erro no login:', err);
     res.status(500).json({ message: 'Erro no servidor' });
   }
 });
+
 
 
 
@@ -554,6 +605,7 @@ app.use((err, _req, res, _next) => {
 /* ====================== Start ====================== */
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
 
 
 
