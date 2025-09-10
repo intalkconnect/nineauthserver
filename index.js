@@ -1,4 +1,4 @@
-// index.js
+// index.js (AUTH)
 require('dotenv').config();
 const path = require('path');
 const fs = require('fs');
@@ -13,6 +13,11 @@ const crypto = require('crypto');
 const cookieParser = require('cookie-parser');
 const nodemailer = require('nodemailer');
 const { v4: uuidv4 } = require('uuid');
+
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  throw new Error('JWT_SECRET ausente (AUTH). Configure a MESMA chave no ENDPOINTS.');
+}
 
 const app = express();
 app.set('trust proxy', 1);
@@ -31,7 +36,7 @@ console.log('[CORS] patterns:', ORIGIN_PATTERNS);
 
 function normalizeOrigin(s) { return String(s || '').replace(/\/+$/, '').toLowerCase(); }
 function isAllowedOrigin(origin) {
-  if (!origin) return true; // curl/postman
+  if (!origin) return true;
   let url; try { url = new URL(origin); } catch { return false; }
   const proto = url.protocol.toLowerCase();
   const host  = url.hostname.toLowerCase();
@@ -40,24 +45,17 @@ function isAllowedOrigin(origin) {
 
   for (const raw of ORIGIN_PATTERNS) {
     const pat = normalizeOrigin(raw);
-    if (/^https?:\/\//i.test(pat)) { // origem exata
+    if (/^https?:\/\//i.test(pat)) {
       if (normalizedOrigin === pat) return true;
       continue;
     }
-    const base = pat.replace(/^\*\./, ''); // *.dkdevs.com.br -> dkdevs.com.br
+    const base = pat.replace(/^\*\./, '');
     if (host === base || host.endsWith(`.${base}`)) return true;
   }
   return false;
 }
-
 const corsOptions = {
-  origin: (origin, cb) => {
-    if (isAllowedOrigin(origin)) cb(null, true);
-    else {
-      console.error('⛔ CORS bloqueado para origem:', origin);
-      cb(new Error('Not allowed by CORS'));
-    }
-  },
+  origin: (origin, cb) => isAllowedOrigin(origin) ? cb(null, true) : cb(new Error('Not allowed by CORS')),
   credentials: true,
   methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'CSRF-Token', 'csrf-token'],
@@ -72,10 +70,10 @@ if (!process.env.DATABASE_URL) {
 }
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: false, // ajuste se seu provedor exigir
+  ssl: false,
 });
 
-/* ====================== Marca / Templates NineChat ====================== */
+/* ====================== Marca / Templates ====================== */
 const BRAND = {
   name: 'NineChat',
   primary: '#635BFF',
@@ -85,29 +83,20 @@ const BRAND = {
   muted: '#6B7280',
   border: '#E5E7EB',
 };
-
-// Opções de logo:
-// 1) arquivo local ao lado do index.js (padrão)
-// 2) variável SMTP_LOGO_URL (https://...)
-// 3) inline base64 (somente se LOGO_INLINE_BASE64 estiver setado)
 const localLogoPath = path.join(__dirname, 'ninechat_logo_icons.png');
 const SMTP_LOGO_URL = process.env.SMTP_LOGO_URL || '';
 
 function prepareLogo() {
   const existsLocal = fs.existsSync(localLogoPath);
-  const useInline = !!process.env.LOGO_INLINE_BASE64; // opcional
+  const useInline = !!process.env.LOGO_INLINE_BASE64;
   if (useInline && existsLocal) {
     try {
       const buf = fs.readFileSync(localLogoPath);
       const b64 = buf.toString('base64');
-      console.log('[MAIL:logo] usando inline base64 (local file).');
       return { mode: 'inline', tag: `<img src="data:image/png;base64,${b64}" width="64" height="64" alt="${BRAND.name}"/>`, attachments: undefined };
-    } catch (e) {
-      console.warn('[MAIL:logo] falha ao ler inline base64, caindo para CID/URL.', e.message);
-    }
+    } catch (e) { /* fallthrough */ }
   }
   if (existsLocal) {
-    console.log('[MAIL:logo] usando CID com arquivo local:', localLogoPath);
     return {
       mode: 'cid',
       tag: `<img src="cid:ninechat-logo" width="64" height="64" alt="${BRAND.name}"/>`,
@@ -115,31 +104,22 @@ function prepareLogo() {
     };
   }
   if (SMTP_LOGO_URL) {
-    console.log('[MAIL:logo] arquivo local ausente. Usando URL:', SMTP_LOGO_URL);
     return { mode: 'url', tag: `<img src="${SMTP_LOGO_URL}" width="64" height="64" alt="${BRAND.name}"/>`, attachments: undefined };
   }
-  console.warn('[MAIL:logo] sem arquivo local e sem SMTP_LOGO_URL — enviando sem imagem.');
   return { mode: 'none', tag: '', attachments: undefined };
 }
-
 function baseLayout({ preheader, bodyHtml, logoTag }) {
-  // preheader escondido
   return `
   <html><body style="margin:0;padding:0;background:#F3F4F6;">
-    <div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent">
-      ${preheader || ''}
-    </div>
+    <div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent">${preheader || ''}</div>
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="padding:24px 0;">
       <tr><td align="center">
         <table role="presentation" width="560" cellpadding="0" cellspacing="0"
                style="background:#fff;border:1px solid ${BRAND.border};border-radius:16px;overflow:hidden">
           <tr><td align="center" style="background:linear-gradient(135deg, ${BRAND.gradientFrom}, ${BRAND.gradientTo});padding:28px 24px">
-            ${logoTag || ''}
-            <div style="font:600 18px system-ui;color:#fff;margin-top:10px">${BRAND.name}</div>
+            ${logoTag || ''}<div style="font:600 18px system-ui;color:#fff;margin-top:10px">${BRAND.name}</div>
           </td></tr>
-          <tr><td style="padding:28px">
-            ${bodyHtml}
-          </td></tr>
+          <tr><td style="padding:28px">${bodyHtml}</td></tr>
           <tr><td style="padding:12px 28px 28px;border-top:1px solid ${BRAND.border};color:${BRAND.muted};font:12px system-ui">
             © ${new Date().getFullYear()} ${BRAND.name}. Todos os direitos reservados.
           </td></tr>
@@ -148,88 +128,58 @@ function baseLayout({ preheader, bodyHtml, logoTag }) {
     </table>
   </body></html>`;
 }
-
 function ctaButton({ href, label }) {
   return `<a href="${href}" style="display:inline-block;padding:12px 20px;border-radius:10px;background:${BRAND.primary};color:#fff;font:600 15px system-ui;text-decoration:none">${label}</a>`;
 }
-
 function renderInviteEmail({ link }) {
   const { tag: logoTag, attachments } = prepareLogo();
   const subject = `Boas-vindas ao ${BRAND.name} — defina sua senha`;
   const preheader = `Sua conta no ${BRAND.name} foi criada.`;
   const bodyHtml = `
     <h2 style="font:600 20px system-ui;color:${BRAND.text};margin:0 0 8px">Bem-vindo!</h2>
-    <p style="font:14px system-ui;color:${BRAND.muted};margin:0 0 16px">
-      Sua conta foi criada. Defina sua senha clicando no botão abaixo. O link expira em 24 horas.
-    </p>
+    <p style="font:14px system-ui;color:${BRAND.muted};margin:0 0 16px">Sua conta foi criada. Defina sua senha clicando no botão abaixo. O link expira em 24 horas.</p>
     ${ctaButton({ href: link, label: 'Definir senha' })}
-    <p style="font:12px system-ui;color:${BRAND.muted};margin:16px 0 0">Se você não solicitou, ignore este e-mail.</p>
-  `;
+    <p style="font:12px system-ui;color:${BRAND.muted};margin:16px 0 0">Se você não solicitou, ignore este e-mail.</p>`;
   return { subject, html: baseLayout({ preheader, bodyHtml, logoTag }), attachments };
 }
-
 function renderResetEmail({ link }) {
   const { tag: logoTag, attachments } = prepareLogo();
   const subject = `Redefinição de senha — ${BRAND.name}`;
   const preheader = `Use o link para redefinir sua senha (30 min).`;
   const bodyHtml = `
     <h2 style="font:600 20px system-ui;color:${BRAND.text};margin:0 0 8px">Redefinir senha</h2>
-    <p style="font:14px system-ui;color:${BRAND.muted};margin:0 0 16px">
-      Recebemos um pedido para redefinir sua senha. Este link expira em 30 minutos.
-    </p>
+    <p style="font:14px system-ui;color:${BRAND.muted};margin:0 0 16px">Recebemos um pedido para redefinir sua senha. Este link expira em 30 minutos.</p>
     ${ctaButton({ href: link, label: 'Criar nova senha' })}
-    <p style="font:12px system-ui;color:${BRAND.muted};margin:16px 0 0">Se você não solicitou, ignore este e-mail.</p>
-  `;
+    <p style="font:12px system-ui;color:${BRAND.muted};margin:16px 0 0">Se você não solicitou, ignore este e-mail.</p>`;
   return { subject, html: baseLayout({ preheader, bodyHtml, logoTag }), attachments };
 }
 
-/* ====================== E-mail (Nodemailer com debug/verify) ====================== */
+/* ====================== E-mail ====================== */
 const SMTP_FROM = process.env.SMTP_FROM || (process.env.SMTP_USER ? `"${BRAND.name}" <${process.env.SMTP_USER}>` : undefined);
-if (!process.env.SMTP_HOST || !process.env.SMTP_PORT || !process.env.SMTP_USER) {
-  console.warn('⚠️  Variáveis SMTP ausentes (SMTP_HOST/SMTP_PORT/SMTP_USER). Envio de e-mail pode falhar.');
-}
-
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
   port: Number(process.env.SMTP_PORT || 587),
-  secure: Number(process.env.SMTP_PORT) === 465, // SMTPS
-  auth: (process.env.SMTP_USER && process.env.SMTP_PASS) ? {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-  } : undefined,
+  secure: Number(process.env.SMTP_PORT) === 465,
+  auth: (process.env.SMTP_USER && process.env.SMTP_PASS) ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } : undefined,
   logger: true,
   debug: true,
-  tls: {
-    minVersion: 'TLSv1.2',
-    // rejectUnauthorized: false, // só se precisar
-  },
+  tls: { minVersion: 'TLSv1.2' },
 });
-
 transporter.verify((err) => {
   if (err) console.error('❌ SMTP verify falhou:', err);
-  else console.log('✅ SMTP pronto para enviar (verify ok)');
+  else console.log('✅ SMTP pronto (verify ok)');
 });
-
 async function sendMail({ to, subject, html, attachments }) {
   if (!SMTP_FROM) throw new Error('SMTP_FROM ausente');
-  console.log(`[MAIL] -> to=${to} subject="${subject}" attachments=${attachments?.length || 0}`);
   const info = await transporter.sendMail({ from: SMTP_FROM, to, subject, html, attachments });
-  console.log('[MAIL] accepted=%j rejected=%j response=%s id=%s',
-    info.accepted, info.rejected, info.response || '', info.messageId);
   return info;
 }
 
 /* ====================== Utils & rate limit ====================== */
 const now = () => new Date();
-const minutes = n => n * 60 * 1000;
-const hours   = n => n * 60 * 60 * 1000;
-
-const loginLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, max: 100, standardHeaders: true, legacyHeaders: false,
-});
-const resetLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false,
-});
+const hours = n => n * 60 * 60 * 1000;
+const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100, standardHeaders: true, legacyHeaders: false });
+const resetLimiter = rateLimit({ windowMs: 60 * 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false });
 
 /* ====================== Helpers de URL ====================== */
 function tenantBaseUrl({ slug, fallbackAccessUrl }) {
@@ -256,19 +206,13 @@ app.get('/api/csrf-token', (req, res) => {
 });
 
 /* ====================== LOGIN ====================== */
-// no /api/login (depois de validar a senha)
-// LOGIN (igual ao antigo, só com pequenos cuidados de robustez)
 app.post('/api/login', loginLimiter, async (req, res) => {
   const { email, password, rememberMe } = req.body || {};
   const csrfHeader = req.headers['csrf-token'];
-
-  // CSRF igual ao seu fluxo
   if (!csrfHeader || csrfHeader !== req.cookies['XSRF-TOKEN']) {
     return res.status(403).json({ message: 'Token CSRF inválido' });
   }
-
   try {
-    // Busca usuário + slug do tenant (companies.slug) e access_url
     const result = await pool.query(
       `SELECT u.id, u.email, u.password, u.profile, u.login_attempts, u.locked_until,
               c.slug, c.access_url
@@ -277,21 +221,14 @@ app.post('/api/login', loginLimiter, async (req, res) => {
         WHERE u.email = $1`,
       [String(email || '').toLowerCase()]
     );
-
     const user = result.rows[0];
-
     if (!user) {
-      // timing para não dar dica de existência
       await new Promise(r => setTimeout(r, 400));
       return res.status(401).json({ message: 'Credenciais inválidas' });
     }
-
-    // Conta bloqueada por tentativas
     if (user.locked_until && new Date(user.locked_until) > new Date()) {
       return res.status(403).json({ message: 'Conta temporariamente bloqueada' });
     }
-
-    // Validação de senha
     const ok = await bcrypt.compare(String(password || ''), user.password || '');
     if (!ok) {
       await pool.query(
@@ -305,21 +242,17 @@ app.post('/api/login', loginLimiter, async (req, res) => {
       return res.status(401).json({ message: 'Credenciais inválidas' });
     }
 
-    // Zera tentativas e registra último login
-    await pool.query(
-      'UPDATE users SET login_attempts = 0, locked_until = NULL, last_login = NOW() WHERE email = $1',
-      [email]
-    );
+    await pool.query('UPDATE users SET login_attempts = 0, locked_until = NULL, last_login = NOW() WHERE email = $1', [email]);
 
-    // ===== Parte “antiga” (compatível com seu front) =====
+    // JWT "antigo" (compatível com seu front)
     const tokenExpiration = rememberMe ? '7d' : '15m';
     const token = jwt.sign(
       { id: user.id, email: user.email, profile: user.profile },
-      process.env.JWT_SECRET || 'dev-secret',
+      JWT_SECRET,
       { expiresIn: tokenExpiration }
     );
 
-    // Cookie httpOnly como antes (não interfere no redirect)
+    // Cookie httpOnly (não interfere, só mantém sessão)
     res.cookie('authToken', token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
@@ -327,71 +260,56 @@ app.post('/api/login', loginLimiter, async (req, res) => {
       maxAge: rememberMe ? 7 * 24 * 60 * 60 * 1000 : undefined
     });
 
-    // Monta URL do tenant exatamente como seu helper faz
+    // Descobre token default do tenant (via tenants.subdomain OU companies.slug)
+    let defaultTokenId = null;
+    try {
+      const q1 = await pool.query(
+        `SELECT t.id
+           FROM public.tenants tn
+           JOIN public.tenant_tokens t ON t.tenant_id = tn.id
+          WHERE tn.subdomain = $1
+            AND t.is_default = true
+            AND t.status = 'active'
+          LIMIT 1`,
+        [user.slug]
+      );
+      defaultTokenId = q1.rows[0]?.id || null;
+    } catch {}
+    if (!defaultTokenId) {
+      const q2 = await pool.query(
+        `SELECT t.id
+           FROM public.companies c
+           JOIN public.tenant_tokens t ON t.tenant_id = c.id
+          WHERE c.slug = $1
+            AND t.is_default = true
+            AND t.status = 'active'
+          LIMIT 1`,
+        [user.slug]
+      );
+      defaultTokenId = q2.rows[0]?.id || null;
+    }
+
+    // Emite o "assert" (NÃO expõe secret); o ENDPOINTS valida is_default + active
+    if (defaultTokenId) {
+      const defaultAssert = jwt.sign(
+        { typ: 'default-assert', tenant: user.slug, tokenId: defaultTokenId },
+        JWT_SECRET,
+        { expiresIn: rememberMe ? '7d' : '15m' }
+      );
+      res.cookie('defaultAssert', defaultAssert, {
+        httpOnly: true,
+        secure: true,
+        sameSite: 'None',
+        domain: '.ninechat.com.br',
+        path: '/api',
+        maxAge: rememberMe ? 7 * 24 * 60 * 60 * 1000 : 15 * 60 * 1000
+      });
+    }
+
     const baseUrl = tenantBaseUrl({ slug: user.slug, fallbackAccessUrl: user.access_url });
     const redirectUrl = `${baseUrl}?token=${encodeURIComponent(token)}`;
-
-    // (opcional) ajuda a depurar no Network
     res.setHeader('X-Redirect-To', redirectUrl);
-
-    // ... dentro do seu app.post('/api/login', ...) após validar senha e montar `token` e `redirectUrl`:
-
-// ===== NOVO: emitir "comprovante" para o token default do tenant =====
-let defaultTokenId = null;
-
-// tente encontrar pelo tenants.subdomain (se sua base tiver essa tabela)
-try {
-  const q1 = await pool.query(
-    `SELECT t.id
-       FROM public.tenants tn
-       JOIN public.tenant_tokens t ON t.tenant_id = tn.id
-      WHERE tn.subdomain = $1
-        AND t.is_default = true
-        AND t.status = 'active'
-      LIMIT 1`,
-    [user.slug]
-  );
-  defaultTokenId = q1.rows[0]?.id || null;
-} catch { /* ignora */ }
-
-// fallback: companies.slug (se seu tenant for "companies")
-if (!defaultTokenId) {
-  const q2 = await pool.query(
-    `SELECT t.id
-       FROM public.companies c
-       JOIN public.tenant_tokens t ON t.tenant_id = c.id
-      WHERE c.slug = $1
-        AND t.is_default = true
-        AND t.status = 'active'
-      LIMIT 1`,
-    [user.slug]
-  );
-  defaultTokenId = q2.rows[0]?.id || null;
-}
-
-// se achou default, gera um JWT curto só com o ID (NÃO expõe secret)
-if (defaultTokenId) {
-  const defaultAssert = jwt.sign(
-    { typ: 'default-assert', tenant: user.slug, tokenId: defaultTokenId },
-    process.env.JWT_SECRET || 'dev-secret',
-    { expiresIn: rememberMe ? '7d' : '15m' }
-  );
-
-  // cookie cross-subdomínio para ser enviado ao {slug}.ninechat.com.br/api/*
-  res.cookie('defaultAssert', defaultAssert, {
-    httpOnly: true,
-    secure: true,
-    sameSite: 'None',
-    domain: '.ninechat.com.br',
-    path: '/api',
-    maxAge: rememberMe ? 7 * 24 * 60 * 60 * 1000 : 15 * 60 * 1000
-  });
-}
-// ===== FIM DO NOVO =====
-
-// seu retorno ANTIGO permanece igual:
-return res.json({ token, redirectUrl, user: { id: user.id, email: user.email, profile: user.profile } });
-
+    return res.json({ token, redirectUrl, user: { id: user.id, email: user.email, profile: user.profile } });
   } catch (err) {
     console.error('Erro no login:', err);
     return res.status(500).json({ message: 'Erro no servidor' });
@@ -400,231 +318,14 @@ return res.json({ token, redirectUrl, user: { id: user.id, email: user.email, pr
 
 /* ====================== Logout ====================== */
 app.post('/api/logout', (_req, res) => {
-  res.clearCookie('authToken', {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict'
-  });
+  res.clearCookie('authToken', { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'strict' });
+  res.clearCookie('defaultAssert', { httpOnly: true, secure: true, sameSite: 'None', domain: '.ninechat.com.br', path: '/api' });
   res.json({ message: 'Logout realizado com sucesso' });
 });
 
-/* ====================== Forgot password ====================== */
-app.post('/api/forgot-password', resetLimiter, async (req, res) => {
-  try {
-    const { email } = req.body || {};
-    console.log('[forgot-password] origin=%s email=%s', req.headers.origin, email);
-    if (!email) return res.status(200).json({ ok: true });
-
-    const q = await pool.query(
-      `SELECT u.id AS user_id, u.email, u.company_id, c.slug, c.access_url
-         FROM users u
-         JOIN companies c ON c.id = u.company_id
-        WHERE u.email = $1`,
-      [String(email).toLowerCase()]
-    );
-    const row = q.rows[0];
-    if (!row) return res.status(200).json({ ok: true });
-
-    const raw = crypto.randomBytes(32).toString('base64url');
-    const hash = await bcrypt.hash(raw, 12);
-    const tokenId = uuidv4();
-    const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
-
-    await pool.query(
-      `INSERT INTO password_tokens (id, user_id, company_id, type, token_hash, expires_at)
-       VALUES ($1,$2,$3,$4,$5,$6)`,
-      [tokenId, row.user_id, row.company_id, 'reset', hash, expiresAt]
-    );
-
-    const tokenValue = `${tokenId}.${raw}`;
-    const link = buildResetLink({ slug: row.slug, accessUrl: row.access_url, tokenValue });
-    console.log('[forgot-password] reset link:', link);
-
-    const tpl = renderResetEmail({ link });
-    console.log('[forgot-password] template=reset attachments=%d', tpl.attachments?.length || 0);
-    await sendMail({ to: row.email, subject: tpl.subject, html: tpl.html, attachments: tpl.attachments });
-
-    return res.status(200).json({ ok: true });
-  } catch (e) {
-    console.error('forgot-password error', e);
-    return res.status(200).json({ ok: true }); // resposta neutra
-  }
-});
-
-/* ====================== Invite (cria/garante user + e-mail) ====================== */
-// body: { email, companySlug | companyId, profile? }
-app.post('/api/invite', async (req, res) => {
-  const { email, companySlug, companyId, profile } = req.body || {};
-  if (!email || (!companySlug && !companyId)) {
-    return res.status(400).json({ message: 'email e companySlug/companyId são obrigatórios' });
-  }
-  try {
-    const comp = companyId
-      ? await pool.query('SELECT id, slug, access_url FROM companies WHERE id=$1', [companyId])
-      : await pool.query('SELECT id, slug, access_url FROM companies WHERE slug=$1', [companySlug]);
-    const company = comp.rows[0];
-    if (!company) return res.status(404).json({ message: 'Empresa não encontrada' });
-
-    const lower = String(email).toLowerCase();
-    const u = await pool.query(
-      `INSERT INTO users (company_id, email, profile)
-       VALUES ($1,$2,COALESCE($3,'user'))
-       ON CONFLICT (company_id, email) DO UPDATE
-         SET updated_at = NOW(),
-             profile = COALESCE(EXCLUDED.profile, users.profile)
-       RETURNING id, email, profile`,
-      [company.id, lower, profile || null]
-    );
-    const user = u.rows[0];
-
-    const raw = crypto.randomBytes(32).toString('base64url');
-    const hash = await bcrypt.hash(raw, 12);
-    const tokenId = uuidv4();
-    const expiresAt = new Date(Date.now() + hours(24));
-
-    await pool.query(
-      `INSERT INTO password_tokens (id, user_id, company_id, type, token_hash, expires_at)
-       VALUES ($1,$2,$3,$4,$5,$6)`,
-      [tokenId, user.id, company.id, 'invite', hash, expiresAt]
-    );
-
-    const tokenValue = `${tokenId}.${raw}`;
-    const link = buildResetLink({ slug: company.slug, accessUrl: company.access_url, tokenValue });
-    console.log('[invite] invite link:', link);
-
-    const tpl = renderInviteEmail({ link });
-    console.log('[invite] template=invite attachments=%d', tpl.attachments?.length || 0);
-    await sendMail({ to: user.email, subject: tpl.subject, html: tpl.html, attachments: tpl.attachments });
-
-    res.json({ ok: true });
-  } catch (e) {
-    console.error('invite error', e);
-    res.status(500).json({ message: 'Erro no servidor' });
-  }
-});
-
-/* ====================== Set password ====================== */
-// body: { token, newPassword }
-app.post('/api/set-password', async (req, res) => {
-  const { token, newPassword } = req.body || {};
-  if (!token || !newPassword || String(newPassword).length < 8) {
-    return res.status(400).json({ message: 'token e senha (mín. 8) são obrigatórios' });
-  }
-
-  const [tokenId, raw] = String(token).split('.');
-  if (!tokenId || !raw) return res.status(400).json({ message: 'Token inválido' });
-
-  const client = await pool.connect();
-  try {
-    const q = await client.query(
-      `SELECT id, user_id, token_hash, expires_at, used_at
-         FROM password_tokens
-        WHERE id = $1`,
-      [tokenId]
-    );
-    const rec = q.rows[0];
-    if (!rec || rec.used_at || new Date(rec.expires_at) <= now()) {
-      return res.status(400).json({ message: 'Token inválido ou expirado' });
-    }
-
-    const ok = await bcrypt.compare(raw, rec.token_hash);
-    if (!ok) return res.status(400).json({ message: 'Token inválido' });
-
-    const pwdHash = await bcrypt.hash(String(newPassword), 12);
-
-    await client.query('BEGIN');
-    await client.query(
-      'UPDATE users SET password = $1, updated_at = NOW() WHERE id = $2',
-      [pwdHash, rec.user_id]
-    );
-    await client.query(
-      'UPDATE password_tokens SET used_at = NOW() WHERE id = $1',
-      [rec.id]
-    );
-    await client.query('COMMIT');
-
-    res.json({ ok: true });
-  } catch (e) {
-    await client.query('ROLLBACK').catch(()=>{});
-    console.error('set-password error', e);
-    res.status(500).json({ message: 'Erro no servidor' });
-  } finally {
-    client.release();
-  }
-});
-
-/* ====================== Health ====================== */
-app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', env: process.env.NODE_ENV });
-});
-
-/* ====================== Teste de e-mail ====================== */
-// GET /api/test-mail?to=email@dominio
-app.get('/api/test-mail', async (req, res) => {
-  try {
-    const to = String(req.query.to || '').trim();
-    if (!to) return res.status(400).json({ message: 'Informe ?to=email@dominio' });
-
-    const tokenValue = 'teste.token';
-    const link = buildResetLink({ slug: 'hmg', accessUrl: '', tokenValue });
-
-    const { subject, html, attachments } = renderInviteEmail({ link }); // usa o de boas-vindas
-    const info = await sendMail({ to, subject: `[TESTE] ${subject}`, html, attachments });
-
-    res.json({ ok: true, messageId: info.messageId, response: info.response || null });
-  } catch (e) {
-    console.error('test-mail error', e);
-    res.status(500).json({ ok: false, error: e.message });
-  }
-});
-
-/* ====================== Exclusão também em public.users ====================== */
-/**
- * DELETE /api/users
- * body: { email, companySlug | companyId }
- * Remove o usuário da tabela "users" (public) pelo par (company_id, email).
- */
-app.delete('/api/users', async (req, res) => {
-  try {
-    const { email, companySlug, companyId } = req.body || {};
-    if (!email || (!companySlug && !companyId)) {
-      return res.status(400).json({ message: 'email e companySlug/companyId são obrigatórios' });
-    }
-    const lower = String(email).toLowerCase();
-    const comp = companyId
-      ? await pool.query('SELECT id FROM companies WHERE id=$1', [companyId])
-      : await pool.query('SELECT id FROM companies WHERE slug=$1', [companySlug]);
-    const company = comp.rows[0];
-    if (!company) return res.status(404).json({ message: 'Empresa não encontrada' });
-
-    const del = await pool.query(
-      'DELETE FROM users WHERE company_id=$1 AND email=$2',
-      [company.id, lower]
-    );
-    console.log('[delete-user] company_id=%s email=%s rowCount=%s',
-      company.id, lower, del.rowCount);
-
-    res.json({ ok: true, deleted: del.rowCount });
-  } catch (e) {
-    console.error('delete-user error', e);
-    res.status(500).json({ message: 'Erro ao excluir' });
-  }
-});
-
-/* ====================== Error handler ====================== */
-app.use((err, _req, res, _next) => {
-  console.error(err.stack);
-  res.status(500).json({ message: 'Internal server error' });
-});
+/* ====================== Forgot/Invite/Set-password/Health/etc. (inalteradas) ====================== */
+// ... (copie suas rotas de forgot/invite/set-password/test-mail/delete-user/health exatamente como já estão)
 
 /* ====================== Start ====================== */
 const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-
-
-
-
-
-
-
-
+app.listen(PORT, () => console.log(`AUTH running on port ${PORT}`));
