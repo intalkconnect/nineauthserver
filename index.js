@@ -286,14 +286,16 @@ app.post('/api/login', loginLimiter, async (req, res) => {
     }
 
     // 🔑 AQUI buscamos o token default do tenant
-    const { rows: defRows } = await pool.query(
-      `SELECT t.id
-         FROM public.tenants tn
-         JOIN public.tenant_tokens t ON t.tenant_id = tn.id
-        WHERE tn.slug = $1 AND t.is_default = true AND t.status = 'active'
-        LIMIT 1`,
-      [user.slug]
-    );
+ const { rows: defRows } = await pool.query(
+   `SELECT t.id
+      FROM public.tenants tn
+      JOIN public.tenant_tokens t ON t.tenant_id = tn.id
+     WHERE tn.subdomain = $1
+       AND t.is_default = true
+       AND t.status = 'active'
+     LIMIT 1`,
+   [user.slug] // aqui o "slug" que você já tem do SELECT em companies deve coincidir com tenants.subdomain
+ );
     const defaultTokenId = defRows[0]?.id;
     if (!defaultTokenId) {
       return res.status(403).json({ message: 'Tenant sem token default ativo' });
@@ -552,6 +554,7 @@ app.use((err, _req, res, _next) => {
 /* ====================== Start ====================== */
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
 
 
 
