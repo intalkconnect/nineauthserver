@@ -245,18 +245,21 @@ app.post('/api/login', loginLimiter, async (req, res) => {
     await pool.query('UPDATE users SET login_attempts = 0, locked_until = NULL, last_login = NOW() WHERE email = $1', [email]);
 
     // JWT "antigo" (compatível com seu front)
-    const tokenExpiration = rememberMe ? '7d' : '15m';
-    const token = jwt.sign(
-      { id: user.id, email: user.email, profile: user.profile },
-      JWT_SECRET,
-      { expiresIn: tokenExpiration }
-    );
+   const tokenExpiration = rememberMe ? '7d' : '15m';
+   const tokenPayload = {
+   id: user.id,
+   email: user.email,
+   profile: user.profile,
+   slug: user.slug,         // <- ajuda no whoami
+   persist: !!rememberMe    // <- para sessão "rolling"
+   };
+   const token = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: tokenExpiration });
 
     // Cookie httpOnly (não interfere, só mantém sessão)
     res.cookie('authToken', token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
+      sameSite: 'lax',
       maxAge: rememberMe ? 7 * 24 * 60 * 60 * 1000 : undefined
     });
 
@@ -316,6 +319,67 @@ app.post('/api/login', loginLimiter, async (req, res) => {
   }
 });
 
+app.get('/api/whoami', async (req, res) => {
+  const raw = req.cookies?.authToken;
+  if (!raw) return res.status(401).json({ authenticated: false });
+
+  try {
+    const payload = jwt.verify(raw, JWT_SECRET);
+    let { id, email, profile, slug, persist } = payload || {};
+    let accessUrl;
+
+    // Se o slug não estiver no token, buscamos no DB
+    if (!slug) {
+      try {
+        const r = await pool.query(
+          `SELECT c.slug, c.access_url
+             FROM users u
+             JOIN companies c ON u.company_id = c.id
+            WHERE u.id = $1
+            LIMIT 1`,
+          [id]
+        );
+        slug = r.rows[0]?.slug || slug;
+        accessUrl = r.rows[0]?.access_url || accessUrl;
+      } catch (_) {}
+    }
+
+    const baseUrl = tenantBaseUrl({ slug, fallbackAccessUrl: accessUrl });
+    const redirectUrl = baseUrl || 'https://portal.ninechat.com.br';
+
+    // ===== Opcional: sessão "rolling" para quem marcou manter conectado =====
+    if (persist) {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const timeLeft = (payload.exp || 0) - nowSec;
+      const THREE_DAYS = 3 * 24 * 60 * 60;
+
+      if (timeLeft > 0 && timeLeft < THREE_DAYS) {
+        const renewed = jwt.sign(
+          { id, email, profile, slug, persist: true },
+          JWT_SECRET,
+          { expiresIn: '7d' }
+        );
+        res.cookie('authToken', renewed, {
+          httpOnly: true,
+          secure: process.env.NODE_ENV === 'production',
+          sameSite: 'lax',
+          maxAge: 7 * 24 * 60 * 60 * 1000
+        });
+      }
+    }
+    // =====================================================================
+
+    return res.json({
+      authenticated: true,
+      user: { id, email, profile },
+      redirectUrl
+    });
+  } catch {
+    return res.status(401).json({ authenticated: false });
+  }
+});
+
+
 /* ====================== Logout ====================== */
 app.post('/api/logout', (_req, res) => {
   res.clearCookie('authToken', { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'strict' });
@@ -329,3 +393,4 @@ app.post('/api/logout', (_req, res) => {
 /* ====================== Start ====================== */
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`AUTH running on port ${PORT}`));
+
