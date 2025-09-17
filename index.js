@@ -327,8 +327,14 @@ app.post('/api/login', loginLimiter, async (req, res) => {
 });
 
 app.get('/api/whoami', async (req, res) => {
+  const soft = req.query.soft === '1';
+  const unauth = () =>
+    soft
+      ? res.status(200).json({ authenticated: false })
+      : res.status(401).json({ authenticated: false });
+
   const raw = req.cookies?.authToken;
-  if (!raw) return res.status(401).json({ authenticated: false });
+  if (!raw) return unauth();
 
   try {
     const payload = jwt.verify(raw, JWT_SECRET);
@@ -384,7 +390,7 @@ app.get('/api/whoami', async (req, res) => {
       redirectUrl
     });
   } catch {
-    return res.status(401).json({ authenticated: false });
+    return unauth();
   }
 });
 
@@ -421,6 +427,7 @@ app.post('/api/logout', (_req, res) => {
 /* ====================== Start ====================== */
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`AUTH running on port ${PORT}`));
+
 
 
 
