@@ -328,7 +328,7 @@ app.get('/api/whoami', async (req, res) => {
     let { id, email, profile, slug, persist } = payload || {};
     let accessUrl;
 
-    // Se o slug não estiver no token, buscamos no DB
+    // Busca slug/access_url se não estiverem no token
     if (!slug) {
       try {
         const r = await pool.query(
@@ -344,31 +344,33 @@ app.get('/api/whoami', async (req, res) => {
       } catch (_) {}
     }
 
-    const baseUrl = tenantBaseUrl({ slug, fallbackAccessUrl: accessUrl });
-    const redirectUrl = baseUrl || 'https://portal.ninechat.com.br';
+    const baseUrl = tenantBaseUrl({ slug, fallbackAccessUrl: accessUrl }) || 'https://portal.ninechat.com.br';
 
-    // ===== Opcional: sessão "rolling" para quem marcou manter conectado =====
+    // (Opcional) sessão rolling para “manter conectado”
+    let tokenForUrl = raw;
     if (persist) {
       const nowSec = Math.floor(Date.now() / 1000);
       const timeLeft = (payload.exp || 0) - nowSec;
       const THREE_DAYS = 3 * 24 * 60 * 60;
-
       if (timeLeft > 0 && timeLeft < THREE_DAYS) {
-        const renewed = jwt.sign(
+        tokenForUrl = jwt.sign(
           { id, email, profile, slug, persist: true },
           JWT_SECRET,
           { expiresIn: '7d' }
         );
-        res.cookie('authToken', renewed, {
+        res.cookie('authToken', tokenForUrl, {
           httpOnly: true,
-          secure: process.env.NODE_ENV === 'production',
-          sameSite: 'lax',
+          secure: true,
+          sameSite: 'None',         // cross-site
           maxAge: 7 * 24 * 60 * 60 * 1000
         });
       }
     }
-    // =====================================================================
 
+    // IMPORTANTE: incluir ?token= na URL de redirecionamento
+    const redirectUrl = `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}token=${encodeURIComponent(tokenForUrl)}`;
+
+    res.set('Cache-Control', 'no-store');
     return res.json({
       authenticated: true,
       user: { id, email, profile },
@@ -378,6 +380,7 @@ app.get('/api/whoami', async (req, res) => {
     return res.status(401).json({ authenticated: false });
   }
 });
+
 
 
 /* ====================== Logout ====================== */
@@ -393,5 +396,6 @@ app.post('/api/logout', (_req, res) => {
 /* ====================== Start ====================== */
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`AUTH running on port ${PORT}`));
+
 
 
