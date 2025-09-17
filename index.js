@@ -34,7 +34,13 @@ const RAW_PATTERNS =
 const ORIGIN_PATTERNS = RAW_PATTERNS.split(',').map(s => s.trim()).filter(Boolean);
 console.log('[CORS] patterns:', ORIGIN_PATTERNS);
 
-function normalizeOrigin(s) { return String(s || '').replace(/\/+$/, '').toLowerCase(); }
+ function normalizeOrigin(s) {
+   return String(s || '')
+     .trim()
+     .replace(/^['"]+|['"]+$/g, '')   // <- remove aspas do YAML/.env
+     .replace(/\/+$/, '')
+     .toLowerCase();
+ }
 function isAllowedOrigin(origin) {
   if (!origin) return true;
   let url; try { url = new URL(origin); } catch { return false; }
@@ -415,6 +421,7 @@ app.post('/api/logout', (_req, res) => {
 /* ====================== Start ====================== */
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`AUTH running on port ${PORT}`));
+
 
 
 
