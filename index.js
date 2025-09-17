@@ -58,7 +58,7 @@ const corsOptions = {
   origin: (origin, cb) => isAllowedOrigin(origin) ? cb(null, true) : cb(new Error('Not allowed by CORS')),
   credentials: true,
   methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'CSRF-Token', 'csrf-token'],
+  allowedHeaders: ['Content-Type', 'CSRF-Token', 'csrf-token', 'Cache-Control', 'Pragma', 'Authorization'],
   exposedHeaders: ['CSRF-Token'],
 };
 app.use(cors(corsOptions));
@@ -258,8 +258,8 @@ app.post('/api/login', loginLimiter, async (req, res) => {
     // Cookie httpOnly (não interfere, só mantém sessão)
     res.cookie('authToken', token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
+      secure: true,
+      sameSite: 'none',
       maxAge: rememberMe ? 7 * 24 * 60 * 60 * 1000 : undefined
     });
 
@@ -393,4 +393,5 @@ app.post('/api/logout', (_req, res) => {
 /* ====================== Start ====================== */
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`AUTH running on port ${PORT}`));
+
 
