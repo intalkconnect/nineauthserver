@@ -260,6 +260,7 @@ app.post('/api/login', loginLimiter, async (req, res) => {
       httpOnly: true,
       secure: true,
       sameSite: 'none',
+      path: '/',
       maxAge: rememberMe ? 7 * 24 * 60 * 60 * 1000 : undefined
     });
 
@@ -385,10 +386,28 @@ app.get('/api/whoami', async (req, res) => {
 
 /* ====================== Logout ====================== */
 app.post('/api/logout', (_req, res) => {
-  res.clearCookie('authToken', { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'strict' });
-  res.clearCookie('defaultAssert', { httpOnly: true, secure: true, sameSite: 'None', domain: '.ninechat.com.br', path: '/api' });
-  res.json({ message: 'Logout realizado com sucesso' });
+  // limpa sessão do AUTH (host-only)
+  res.clearCookie('authToken', {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'None',
+    path: '/',           // precisa bater com o set
+  });
+
+  // limpa o cookie multi-subdomínio usado pelos ENDPOINTS
+  res.clearCookie('defaultAssert', {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'None',
+    domain: '.ninechat.com.br',
+    path: '/api',
+  });
+
+  res.set('Cache-Control', 'no-store');
+  // 204 = sem body; evita CORS/JSON desnecessário
+  return res.status(204).end();
 });
+
 
 /* ====================== Forgot/Invite/Set-password/Health/etc. (inalteradas) ====================== */
 // ... (copie suas rotas de forgot/invite/set-password/test-mail/delete-user/health exatamente como já estão)
@@ -396,6 +415,7 @@ app.post('/api/logout', (_req, res) => {
 /* ====================== Start ====================== */
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`AUTH running on port ${PORT}`));
+
 
 
 
