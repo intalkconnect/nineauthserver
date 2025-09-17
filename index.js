@@ -359,6 +359,18 @@ app.get('/api/whoami', async (req, res) => {
 
     const baseUrl = tenantBaseUrl({ slug, fallbackAccessUrl: accessUrl }) || 'https://portal.ninechat.com.br';
 
+       // se o destino for o portal, não faz sentido anexar ?token
+   let redirectUrl = baseUrl;
+   try {
+     const host = new URL(baseUrl).hostname.toLowerCase();
+     const isPortal = host === 'portal.ninechat.com.br' || host.endsWith('.portal.ninechat.com.br');
+     if (!isPortal) {
+       redirectUrl = `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}token=${encodeURIComponent(raw)}`;
+     }
+   } catch {
+     // se baseUrl não for URL válida, mantenha como está
+   }
+
     // (Opcional) sessão rolling para “manter conectado”
     let tokenForUrl = raw;
     if (persist) {
@@ -427,6 +439,7 @@ app.post('/api/logout', (_req, res) => {
 /* ====================== Start ====================== */
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`AUTH running on port ${PORT}`));
+
 
 
 
