@@ -329,9 +329,8 @@ app.post('/api/login', loginLimiter, async (req, res) => {
 app.get('/api/whoami', async (req, res) => {
   const soft = req.query.soft === '1';
   const unauth = () =>
-    soft
-      ? res.status(200).json({ authenticated: false })
-      : res.status(401).json({ authenticated: false });
+    soft ? res.status(200).json({ authenticated: false })
+         : res.status(401).json({ authenticated: false });
 
   const raw = req.cookies?.authToken;
   if (!raw) return unauth();
@@ -341,7 +340,7 @@ app.get('/api/whoami', async (req, res) => {
     let { id, email, profile, slug, persist } = payload || {};
     let accessUrl;
 
-    // Busca slug/access_url se não estiverem no token
+    // Completa slug/access_url caso falte no token
     if (!slug) {
       try {
         const r = await pool.query(
@@ -357,21 +356,11 @@ app.get('/api/whoami', async (req, res) => {
       } catch (_) {}
     }
 
-    const baseUrl = tenantBaseUrl({ slug, fallbackAccessUrl: accessUrl }) || 'https://portal.ninechat.com.br';
+    const baseUrl =
+      tenantBaseUrl({ slug, fallbackAccessUrl: accessUrl }) ||
+      'https://portal.ninechat.com.br';
 
-       // se o destino for o portal, não faz sentido anexar ?token
-   let redirectUrl = baseUrl;
-   try {
-     const host = new URL(baseUrl).hostname.toLowerCase();
-     const isPortal = host === 'portal.ninechat.com.br' || host.endsWith('.portal.ninechat.com.br');
-     if (!isPortal) {
-       redirectUrl = `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}token=${encodeURIComponent(raw)}`;
-     }
-   } catch {
-     // se baseUrl não for URL válida, mantenha como está
-   }
-
-    // (Opcional) sessão rolling para “manter conectado”
+    // Rolling session (opcional) para quem marcou "manter conectado"
     let tokenForUrl = raw;
     if (persist) {
       const nowSec = Math.floor(Date.now() / 1000);
@@ -386,27 +375,39 @@ app.get('/api/whoami', async (req, res) => {
         res.cookie('authToken', tokenForUrl, {
           httpOnly: true,
           secure: true,
-          sameSite: 'None',         // cross-site
-          maxAge: 7 * 24 * 60 * 60 * 1000
+          sameSite: 'None',
+          path: '/',
+          maxAge: 7 * 24 * 60 * 60 * 1000,
         });
       }
     }
 
-    // IMPORTANTE: incluir ?token= na URL de redirecionamento
-    const redirectUrl = `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}token=${encodeURIComponent(tokenForUrl)}`;
+    // <<< AQUI O PONTO DO ERRO: declare UMA vez só >>>
+    let redirectUrl = baseUrl; // única declaração
+
+    // Só anexa ?token= para tenants; se for portal, não anexa
+    try {
+      const host = new URL(baseUrl).hostname.toLowerCase();
+      const isPortal =
+        host === 'portal.ninechat.com.br' ||
+        host.endsWith('.portal.ninechat.com.br');
+      if (!isPortal) {
+        redirectUrl = `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}token=${encodeURIComponent(tokenForUrl)}`;
+      }
+    } catch {
+      // se baseUrl não for URL absoluta válida, mantém como está
+    }
 
     res.set('Cache-Control', 'no-store');
     return res.json({
       authenticated: true,
       user: { id, email, profile },
-      redirectUrl
+      redirectUrl,
     });
   } catch {
     return unauth();
   }
 });
-
-
 
 /* ====================== Logout ====================== */
 app.post('/api/logout', (_req, res) => {
@@ -439,6 +440,7 @@ app.post('/api/logout', (_req, res) => {
 /* ====================== Start ====================== */
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`AUTH running on port ${PORT}`));
+
 
 
 
