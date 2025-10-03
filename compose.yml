@@ -1,0 +1,54 @@
+version: "3.9"
+
+services:
+  auth:
+    image: node:20-alpine
+    container_name: backend-auth
+    environment:
+      NODE_ENV: production
+      PORT: 3200
+      # Postgres
+      DATABASE_URL: "postgres://postgres:Alice*321@postgres:5432/postgres"
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: postgres
+      PGUSER: postgres
+      PGPASSWORD: "Alice*321"
+      ALLOWED_ORIGIN_PATTERNS: "http://localhost:3000,https://seusite.com,http://localhost:5174,https://portal.ninechat.com.br,*.ninechat.com.br"
+      JWT_SECRET: "17fa304f805422af7fffa24fa8a9a622df190e049596a4ae009368db986c6e4a6c30166b957cf81743b65526"
+      SMTP_HOST: smtp.gmail.com
+      SMTP_PASS: "seen twlo wiql itqt"
+      SMTP_PORT: "465"
+      SMTP_SECURE: "true"
+      SMTP_USER: "daniel.nascimento@dkdevs.com.br"
+      TENANT_DOMAIN_BASE: ninechat.com.br
+      RESET_BASE_URL : portal.ninechat.com.br
+
+    command: >
+      sh -lc '
+        set -euo pipefail;
+        apk add --no-cache git ca-certificates && update-ca-certificates;
+        cd /;
+        rm -rf /app && git clone --depth=1 https://github.com/intalkconnect/nineauthserver.git /app;
+        cd /app;
+        if [ -f package-lock.json ]; then
+          npm ci --omit=dev;
+        else
+          npm install --omit=dev --no-audit --no-fund --legacy-peer-deps || true;
+        fi;
+        node index.js
+      '
+    ports:
+      - "3200:3200"
+    networks:
+      - nginx-proxy-manager_default
+      - public_network
+    restart: unless-stopped
+
+networks:
+  nginx-proxy-manager_default:
+    external: true
+    name: nginx-proxy-manager_default
+  public_network:
+    external: true
+    name: public_network
