@@ -34,13 +34,13 @@ const RAW_PATTERNS =
 const ORIGIN_PATTERNS = RAW_PATTERNS.split(',').map(s => s.trim()).filter(Boolean);
 console.log('[CORS] patterns:', ORIGIN_PATTERNS);
 
- function normalizeOrigin(s) {
-   return String(s || '')
-     .trim()
-     .replace(/^['"]+|['"]+$/g, '')   // <- remove aspas do YAML/.env
-     .replace(/\/+$/, '')
-     .toLowerCase();
- }
+function normalizeOrigin(s) {
+  return String(s || '')
+    .trim()
+    .replace(/^['"]+|['"]+$/g, '')   // <- remove aspas do YAML/.env
+    .replace(/\/+$/, '')
+    .toLowerCase();
+}
 function isAllowedOrigin(origin) {
   if (!origin) return true;
   let url; try { url = new URL(origin); } catch { return false; }
@@ -184,6 +184,11 @@ async function sendMail({ to, subject, html, attachments }) {
 /* ====================== Utils & rate limit ====================== */
 const now = () => new Date();
 const hours = n => n * 60 * 60 * 1000;
+
+// Sessão sempre de 12h (com ou sem "manter conectado")
+const SESSION_JWT = '12h';
+const SESSION_MS  = 12 * 60 * 60 * 1000;
+
 const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100, standardHeaders: true, legacyHeaders: false });
 const resetLimiter = rateLimit({ windowMs: 60 * 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false });
 
@@ -250,24 +255,23 @@ app.post('/api/login', loginLimiter, async (req, res) => {
 
     await pool.query('UPDATE users SET login_attempts = 0, locked_until = NULL, last_login = NOW() WHERE email = $1', [email]);
 
-    // JWT "antigo" (compatível com seu front)
-   const tokenExpiration = rememberMe ? '7d' : '15m';
-   const tokenPayload = {
-   id: user.id,
-   email: user.email,
-   profile: user.profile,
-   slug: user.slug,         // <- ajuda no whoami
-   persist: !!rememberMe    // <- para sessão "rolling"
-   };
-   const token = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: tokenExpiration });
+    // JWT sempre com 12h de duração
+    const tokenPayload = {
+      id: user.id,
+      email: user.email,
+      profile: user.profile,
+      slug: user.slug,         // <- ajuda no whoami
+      persist: !!rememberMe    // <- ainda indica "manter conectado", mas o tempo é sempre 12h
+    };
+    const token = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: SESSION_JWT });
 
-    // Cookie httpOnly (não interfere, só mantém sessão)
+    // Cookie httpOnly (sessão de 12h no browser)
     res.cookie('authToken', token, {
       httpOnly: true,
       secure: true,
-      sameSite: 'none',
+      sameSite: 'None',
       path: '/',
-      maxAge: rememberMe ? 7 * 24 * 60 * 60 * 1000 : undefined
+      maxAge: SESSION_MS
     });
 
     // Descobre token default do tenant (via tenants.subdomain OU companies.slug)
@@ -304,7 +308,7 @@ app.post('/api/login', loginLimiter, async (req, res) => {
       const defaultAssert = jwt.sign(
         { typ: 'default-assert', tenant: user.slug, tokenId: defaultTokenId },
         JWT_SECRET,
-        { expiresIn: rememberMe ? '7d' : '15m' }
+        { expiresIn: SESSION_JWT }
       );
       res.cookie('defaultAssert', defaultAssert, {
         httpOnly: true,
@@ -312,7 +316,7 @@ app.post('/api/login', loginLimiter, async (req, res) => {
         sameSite: 'None',
         domain: '.ninechat.com.br',
         path: '/api',
-        maxAge: rememberMe ? 7 * 24 * 60 * 60 * 1000 : 15 * 60 * 1000
+        maxAge: SESSION_MS
       });
     }
 
@@ -365,19 +369,20 @@ app.get('/api/whoami', async (req, res) => {
     if (persist) {
       const nowSec = Math.floor(Date.now() / 1000);
       const timeLeft = (payload.exp || 0) - nowSec;
-      const THREE_DAYS = 3 * 24 * 60 * 60;
-      if (timeLeft > 0 && timeLeft < THREE_DAYS) {
+      const ROLLING_THRESHOLD = 1 * 60 * 60; // renova se faltar menos de 1h
+
+      if (timeLeft > 0 && timeLeft < ROLLING_THRESHOLD) {
         tokenForUrl = jwt.sign(
           { id, email, profile, slug, persist: true },
           JWT_SECRET,
-          { expiresIn: '7d' }
+          { expiresIn: SESSION_JWT }
         );
         res.cookie('authToken', tokenForUrl, {
           httpOnly: true,
           secure: true,
           sameSite: 'None',
           path: '/',
-          maxAge: 7 * 24 * 60 * 60 * 1000,
+          maxAge: SESSION_MS,
         });
       }
     }
@@ -440,11 +445,3 @@ app.post('/api/logout', (_req, res) => {
 /* ====================== Start ====================== */
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`AUTH running on port ${PORT}`));
-
-
-
-
-
-
-
-
